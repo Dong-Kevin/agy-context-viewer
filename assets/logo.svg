@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="ringGrad" x1="18" y1="18" x2="110" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="52%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#C084FC"/>
+    </linearGradient>
+    <linearGradient id="barGrad" x1="44" y1="42" x2="84" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#A855F7"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer subtle container with ~11% margin -->
+  <rect x="14" y="14" width="100" height="100" rx="26" fill="#18181B" stroke="#3F3F46" stroke-width="3"/>
+  <!-- Gauge track -->
+  <circle cx="64" cy="64" r="35" stroke="#27272A" stroke-width="8"/>
+  <!-- Gauge active arc -->
+  <circle cx="64" cy="64" r="35" stroke="url(#ringGrad)" stroke-width="8" stroke-linecap="round"
+          stroke-dasharray="165 220" transform="rotate(-90 64 64)"/>
+  <!-- Inner bar chart -->
+  <rect x="49" y="64" width="7" height="15" rx="3.5" fill="url(#barGrad)" opacity="0.85"/>
+  <rect x="60.5" y="50" width="7" height="29" rx="3.5" fill="url(#barGrad)"/>
+  <rect x="72" y="57" width="7" height="22" rx="3.5" fill="url(#barGrad)" opacity="0.92"/>
+</svg>

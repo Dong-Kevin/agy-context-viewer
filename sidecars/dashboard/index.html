@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
+  <title>上下文与 Token 看板</title>
+  <script src="/preload.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:ROND,opsz,slnt,wdth,wght@0..100,6..144,-10..0,92..100,100..1000&family=Google+Sans+Code:ital,wght@0,300..800;1,300..800&display=swap">
+  <link rel="stylesheet" href="/styles.css?v=1.6.1">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Sticky Capsule Bar -->
+    <header class="top-bar">
+      <div class="capsule-strip" role="group" aria-label="核心状态速览">
+        <button id="cap-context" type="button" class="capsule-pill active" data-goto-tab="context" title="点击查看当前会话上下文详情">
+          <svg class="mini-ring" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+            <circle class="mini-ring-track" cx="10" cy="10" r="7.2"></circle>
+            <circle id="mini-ring-fill" class="mini-ring-fill" cx="10" cy="10" r="7.2" stroke-dasharray="0 46" transform="rotate(-90 10 10)"></circle>
+          </svg>
+          <span id="cap-ctx-pct" class="num-strong">--%</span>
+        </button>
+
+        <button id="cap-speed" type="button" class="capsule-pill" data-goto-tab="context" title="最新模型生成速度">
+          <svg class="svg-ic ic-bolt" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.2 1.5 3.8 9h4.1l-.9 5.5L12.4 7H8.3l.9-5.5Z"/></svg>
+          <span id="cap-speed-val" class="num">-- tok/s</span>
+        </button>
+
+        <button id="cap-tokens" type="button" class="capsule-pill" data-goto-tab="history" title="本机累计 Token 用量">
+          <svg class="svg-ic ic-bars" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13V8.5M8 13V3.5M13 13V6"/></svg>
+          <span id="cap-tok-val" class="num">--</span>
+        </button>
+      </div>
+
+      <div class="top-actions">
+        <button id="btn-cli" type="button" class="icon-btn cli-btn" title="在当前工作区启动 agy CLI">
+          <span class="mono-tag">&gt;_</span><span>CLI</span>
+        </button>
+        <button id="btn-float" type="button" class="icon-btn" title="弹出或收回右侧置顶小窗">
+          <svg id="ic-float" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 2.2 13.8 6.2 12.2 7.8 11.4 7 8.9 9.5l.6 2.6-1.3 1.3-2.6-2.6-3.1 3.1M6.6 10.8 4 8.2l1.3-1.3 2.6.6L10.4 5l-.8-.8 1.6-1.6"/></svg>
+        </button>
+        <button id="btn-palette" type="button" class="icon-btn" aria-expanded="false" title="菜单栏显示定制、置顶小窗与色阶设置">
+          <svg class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><circle cx="6" cy="6.2" r=".9" class="fill"/><circle cx="9.8" cy="5.8" r=".9" class="fill"/><circle cx="10.6" cy="9" r=".9" class="fill"/><circle cx="6.5" cy="10.2" r="1.1" class="fill"/></svg>
+        </button>
+        <button id="btn-theme" type="button" class="icon-btn" title="切换主题：跟随宿主 / 浅色 / 深色">
+          <svg id="ic-theme" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2a5.8 5.8 0 1 0 5.8 5.8A4.6 4.6 0 0 1 8 2.2Z"/></svg>
+        </button>
+        <button id="btn-refresh" type="button" class="icon-btn" title="强制刷新统计数据">
+          <svg id="ic-refresh" class="svg-ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.6v3h-3"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Slide-down Appearance & Palette Customizer Drawer -->
+    <section id="palette-drawer" class="palette-drawer hidden" aria-label="快捷入口与外观自定义">
+      <div class="drawer-head">
+        <span class="drawer-title">快捷入口模式与外观定制</span>
+        <div class="row-gap">
+          <button id="btn-reset-appearance" type="button" class="ghost-btn xs">恢复默认</button>
+          <button id="btn-close-palette" type="button" class="icon-btn xs" aria-label="关闭设置">×</button>
+        </div>
+      </div>
+
+      <div id="menubar-entry-row" class="palette-row">
+        <span class="field-lbl" title="左键显隐看板 · 右键切换模式">顶部菜单栏常驻图标</span>
+        <div class="seg-group" id="menubar-entry-seg">
+          <button type="button" class="seg-btn active" data-menubar-entry="on">开启</button>
+          <button type="button" class="seg-btn" data-menubar-entry="off">关闭</button>
+        </div>
+      </div>
+
+      <div id="menubar-mode-row" class="palette-row">
+        <span class="field-lbl" title="切换会话时自动跟随更新">菜单栏显示内容</span>
+        <div class="seg-group" id="menubar-mode-seg">
+          <button type="button" class="seg-btn active" data-menubar-mode="context" title="显示当前窗口占用百分比">上下文占比</button>
+          <button type="button" class="seg-btn" data-menubar-mode="speed" title="显示最新速度、耗时与均值/峰值">速度与耗时</button>
+          <button type="button" class="seg-btn" data-menubar-mode="quota" title="显示 5h / Week 额度余量与倒计时">5h/Week 额度</button>
+        </div>
+      </div>
+
+      <div class="palette-row">
+        <span class="field-lbl" title="在屏幕右侧弹出独立置顶小窗，不受宿主右侧栏切换影响">右侧独立置顶窗（📌）</span>
+        <button id="btn-drawer-float" type="button" class="ghost-btn xs">弹出独立置顶小窗</button>
+      </div>
+
+      <div class="drawer-sep"></div>
+
+      <div class="palette-row">
+        <span class="field-lbl">界面主题</span>
+        <div class="seg-group" id="theme-seg">
+          <button type="button" class="seg-btn active" data-theme-mode="auto">跟随宿主</button>
+          <button type="button" class="seg-btn" data-theme-mode="light">浅色</button>
+          <button type="button" class="seg-btn" data-theme-mode="dark">深色</button>
+        </div>
+      </div>
+
+      <div class="palette-row">
+        <span class="field-lbl">热力图色阶预设</span>
+        <div class="preset-chips" id="heat-presets">
+          <button type="button" class="preset-chip active" data-preset="violet"><i style="background:#8b5cf6"></i>流光紫</button>
+          <button type="button" class="preset-chip" data-preset="emerald"><i style="background:#10b981"></i>翡翠绿</button>
+          <button type="button" class="preset-chip" data-preset="sky"><i style="background:#0ea5e9"></i>星际蓝</button>
+          <button type="button" class="preset-chip" data-preset="amber"><i style="background:#f59e0b"></i>琥珀金</button>
+          <button type="button" class="preset-chip" data-preset="rose"><i style="background:#f43f5e"></i>珊瑚红</button>
+        </div>
+      </div>
+
+      <div class="palette-row">
+        <span class="field-lbl">5 档逐格微调与强调色</span>
+        <div class="swatch-strip">
+          <label class="swatch-item" title="1 档（无用量）"><span>L0</span><input type="color" id="col-lvl0"></label>
+          <label class="swatch-item" title="2 档（低用量）"><span>L1</span><input type="color" id="col-lvl1"></label>
+          <label class="swatch-item" title="3 档（中用量）"><span>L2</span><input type="color" id="col-lvl2"></label>
+          <label class="swatch-item" title="4 档（高用量）"><span>L3</span><input type="color" id="col-lvl3"></label>
+          <label class="swatch-item" title="5 档（峰值）"><span>L4</span><input type="color" id="col-lvl4"></label>
+          <span class="v-div"></span>
+          <label class="swatch-item" title="主强调色"><span>强调</span><input type="color" id="col-accent"></label>
+        </div>
+      </div>
+    </section>
+
+    <!-- Primary Segmented Navigation + Conversation Selector -->
+    <nav class="nav-bar" aria-label="主视图切换">
+      <div class="main-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected="true" class="main-tab active" data-tab="context">当前会话</button>
+        <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="history">用量趋势</button>
+        <button type="button" role="tab" aria-selected="false" class="main-tab" data-tab="cost">费用与订阅</button>
+      </div>
+      <div class="conv-picker-wrap">
+        <button id="btn-follow-current" type="button" class="ghost-btn xs hidden" title="切回自动跟随当前对话">回到当前</button>
+        <select id="conv-select" class="conv-select" aria-label="选择要查看的会话" title="默认自动跟随当前面板所属对话，也可切换查看近期归档对话">
+          <option value="">自动跟随当前对话</option>
+        </select>
+      </div>
+    </nav>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <!-- Main Scrollable Viewport -->
+    <main class="viewport">
+      <!-- ==================== TAB 1: CONTEXT & SPEED ==================== -->
+      <section id="panel-context" class="tab-panel active" role="tabpanel">
+        <!-- Hero Card: Context Window & Segmented Breakdown -->
+        <article class="card hero-card">
+          <div class="card-head wrap-gap">
+            <div class="title-group">
+              <h2 class="card-title">上下文窗口占用</h2>
+              <span id="ctx-model-badge" class="meta-chip">读取中…</span>
+              <span id="ctx-pending-badge" class="status-pill warn hidden" title="上一轮响应后新增的待发送步骤预估 Token">+待发 0</span>
+            </div>
+            <div class="row-gap">
+              <div class="seg-group" id="budget-seg" role="group" aria-label="窗口上限基准">
+                <button type="button" class="seg-btn active" data-budget="0" title="跟随服务端报告的窗口预算上限">自动</button>
+                <button type="button" class="seg-btn" data-budget="200000">200K</button>
+                <button type="button" class="seg-btn" data-budget="256000">256K</button>
+                <button type="button" class="seg-btn" data-budget="1000000">1M</button>
+              </div>
+              <span id="ctx-health-pill" class="status-pill neutral">检测中</span>
+            </div>
+          </div>
+
+          <div class="conv-live-bar">
+            <span id="conv-live-title" class="conv-live-title">正在读取当前对话…</span>
+            <span id="conv-live-steps" class="muted xs num">--</span>
+          </div>
+
+          <div class="ctx-hero-grid">
+            <div class="gauge-box">
+              <svg class="hero-ring" width="88" height="88" viewBox="0 0 88 88" aria-hidden="true">
+                <circle class="hero-ring-track" cx="44" cy="44" r="35"></circle>
+                <circle id="hero-ring-cache" class="hero-ring-cache" cx="44" cy="44" r="35" stroke-dasharray="0 220" transform="rotate(-90 44 44)"></circle>
+                <circle id="hero-ring-fill" class="hero-ring-fill" cx="44" cy="44" r="35" stroke-dasharray="0 220" transform="rotate(-90 44 44)"></circle>
+              </svg>
+              <div class="gauge-center">
+                <div id="ctx-pct-big" class="gauge-pct">--%</div>
+                <div id="ctx-gauge-sub" class="gauge-sub">预算占比</div>
+              </div>
+            </div>
+
+            <div class="ctx-metrics-grid">
+              <div class="metric-cell">
+                <span class="m-label">当前已用</span>
+                <span id="ctx-used" class="m-val">--</span>
+                <span id="ctx-used-sub" class="m-sub">服务端统计</span>
+              </div>
+              <div class="metric-cell">
+                <span class="m-label">预算上限</span>
+                <span id="ctx-budget" class="m-val">--</span>
+                <span id="ctx-budget-sub" class="m-sub">自动压缩阈值</span>
+              </div>
+              <div class="metric-cell">
+                <span class="m-label">剩余可用</span>
+                <span id="ctx-rem" class="m-val">--</span>
+                <span id="ctx-rem-sub" class="m-sub">--</span>
+              </div>
+              <div class="metric-cell">
+                <span class="m-label">单轮缓存命中</span>
+                <span id="ctx-cache-rate" class="m-val accent-text">--</span>
+                <span id="ctx-cache-sub" class="m-sub">缓存读取占比</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Segmented Bar (System / Tools / Messages) -->
+          <div class="seg-bar-wrap">
+            <div id="ctx-seg-bar" class="seg-bar" title="上下文构成比例">
+              <div id="seg-sys" class="seg-piece seg-sys" style="width:0%"></div>
+              <div id="seg-tools" class="seg-piece seg-tools" style="width:0%"></div>
+              <div id="seg-msgs" class="seg-piece seg-msgs" style="width:0%"></div>
+            </div>
+            <div id="ctx-seg-legend" class="seg-legend"></div>
+          </div>
+
+          <!-- Session Cumulative 4-Dimension Throughput -->
+          <div class="cum-section">
+            <div class="cum-head">
+              <span class="sub-heading no-margin">本会话累计四维吞吐（含历史轮次）</span>
+              <span id="cum-cache-overall" class="muted xs num">累计缓存率 --</span>
+            </div>
+            <div class="four-grid compact-tiles">
+              <div class="stat-tile">
+                <span class="m-label">累计缓存读取</span>
+                <span id="cum-cache-tok" class="m-val accent-text">--</span>
+              </div>
+              <div class="stat-tile">
+                <span class="m-label">累计新增输入</span>
+                <span id="cum-input-tok" class="m-val">--</span>
+              </div>
+              <div class="stat-tile">
+                <span class="m-label">累计生成输出</span>
+                <span id="cum-output-tok" class="m-val">--</span>
+                <span id="cum-think-sub" class="m-sub">含思考 --</span>
+              </div>
+              <div class="stat-tile">
+                <span class="m-label">会话总吞吐</span>
+                <span id="cum-total-tok" class="m-val">--</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="ctx-takeaway" class="takeaway-box">正在同步当前对话上下文指标…</div>
+
+          <div class="cost-strip">
+            <div class="cost-strip-item">
+              <span class="muted">本轮 API 参考估值</span>
+              <strong id="ctx-round-cost" class="num">--</strong>
+            </div>
+            <div class="cost-strip-item">
+              <span class="muted">当前会话累计折算</span>
+              <strong id="ctx-session-cost" class="num">--</strong>
+            </div>
+          </div>
+        </article>
+
+        <!-- Card 2: Generation Speed, Latency & Model Quota Pool -->
+        <article class="card">
+          <div class="card-head wrap-gap">
+            <div class="title-group">
+              <h2 class="card-title">最新生成速度与耗时</h2>
+              <span id="speed-source-tag" class="meta-chip">实时遥测</span>
+              <span id="sp-avg-peak-chip" class="meta-chip num">均值 -- · 峰值 --</span>
+            </div>
+            <span id="speed-pill" class="status-pill neutral">待生成</span>
+          </div>
+
+          <div class="four-grid">
+            <div class="stat-tile">
+              <span class="m-label">综合速度</span>
+              <span id="sp-tps" class="m-val speed-accent">--</span>
+              <span id="sp-stream-tps" class="m-sub">流式峰值 --</span>
+            </div>
+            <div class="stat-tile">
+              <span class="m-label">生成总耗时</span>
+              <span id="sp-dur" class="m-val">--</span>
+              <span id="sp-stream-sec" class="m-sub">流传输 --</span>
+            </div>
+            <div class="stat-tile">
+              <span class="m-label">首字延迟 TTFT</span>
+              <span id="sp-ttft" class="m-val">--</span>
+              <span class="m-sub">含推理准备</span>
+            </div>
+            <div class="stat-tile">
+              <span class="m-label">本次输出</span>
+              <span id="sp-out" class="m-val">--</span>
+              <span id="sp-think-sub" class="m-sub">思考 -- / 正文 --</span>
+            </div>
+          </div>
+
+          <div id="sp-takeaway" class="takeaway-box compact">等待模型返回生成耗时统计…</div>
+
+          <!-- Active Model Quota Bar -->
+          <div id="ctx-quota-box" class="quota-inline hidden">
+            <div class="quota-inline-head">
+              <span id="ctx-quota-title" class="quota-name">当前模型配额池</span>
+              <span id="ctx-quota-val" class="num-strong">--</span>
+            </div>
+            <div class="thin-track"><div id="ctx-quota-bar" class="thin-fill"></div></div>
+          </div>
+
+          <!-- Turn-by-turn Context & Speed Sparkline -->
+          <div id="spark-wrap" class="spark-wrap hidden">
+            <div class="spark-head">
+              <span>本会话近轮上下文增长曲线</span>
+              <span id="spark-meta" class="muted num">--</span>
+            </div>
+            <svg id="spark-svg" class="spark-svg" viewBox="0 0 360 48" preserveAspectRatio="none"></svg>
+          </div>
+        </article>
+
+        <!-- Card 2.5: Per-Turn Consumption & Tool Timeline (Collapsible, Open by Default) -->
+        <article id="turns-card" class="card collapsible">
+          <button type="button" class="collapse-trigger" data-toggle="turns-body" aria-expanded="true">
+            <div class="title-group">
+              <span class="card-title">每轮消耗与工具调用明细</span>
+              <span id="turns-count-chip" class="meta-chip num">0 轮</span>
+            </div>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="turns-body" class="collapse-body">
+            <div class="turns-toolbar">
+              <span class="muted xs">倒序展示最近 40 轮上下文涨跌（Δ）、缓存率、单轮耗时与调用工具</span>
+              <div class="seg-group" id="turns-filter-seg">
+                <button type="button" class="seg-btn active" data-tfilter="all">全部</button>
+                <button type="button" class="seg-btn" data-tfilter="spike">激增 &gt;5K</button>
+                <button type="button" class="seg-btn" data-tfilter="tools">含工具</button>
+              </div>
+            </div>
+            <div id="turns-timeline" class="turns-timeline"></div>
+          </div>
+        </article>
+
+        <!-- Card 3: Server Context Breakdown Details (Collapsible) -->
+        <article id="breakdown-card" class="card collapsible hidden">
+          <button type="button" class="collapse-trigger" data-toggle="breakdown-body" aria-expanded="false">
+            <span class="card-title">服务端上下文精确构成（System / Tools / Messages）</span>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="breakdown-body" class="collapse-body hidden">
+            <div id="breakdown-groups" class="breakdown-list"></div>
+          </div>
+        </article>
+
+        <!-- Card 4: Technical Audit & Attachments (Collapsible) -->
+        <article class="card collapsible">
+          <button type="button" class="collapse-trigger" data-toggle="audit-body" aria-expanded="false">
+            <span class="card-title">底层技术参数、本地估算与附件审计</span>
+            <span class="chevron">▾</span>
+          </button>
+          <div id="audit-body" class="collapse-body hidden">
+            <div class="sub-heading">最近一次模型请求明细</div>
+            <div id="req-kv" class="kv-grid"></div>
+
+            <div class="sub-heading">全会话归档内容 · 本地启发式估算</div>
+            <div id="local-kv" class="kv-grid"></div>
+
+            <div class="sub-heading-row">
+              <span class="sub-heading no-margin">附件逐项审计</span>
+              <button id="btn-rescan-files" type="button" class="ghost-btn xs">重新扫描附件</button>
+            </div>
+            <div id="attachments-list" class="att-list"></div>
+
+            <p class="fine-print">
+              说明：会话累计包含全部归档历史（含已压缩轮次），不等于下一次实际发送给模型的窗口大小。本地 Token 区间按字符与字节启发式估算；图像按像素尺寸与 Gemini Vision 分块估算；未解析二进制项标注为未知，绝不按 0 处理。所有扫描均在本地只读完成，不上传任何文件。
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <!-- ==================== TAB 2: TOKEN HISTORY & HEATMAP ==================== -->
+      <section id="panel-history" class="tab-panel" role="tabpanel">
+        <div class="filter-bar">
+          <div class="seg-group" id="source-seg" role="group" aria-label="数据来源筛选">
+            <button type="button" class="seg-btn active" data-source="all">全部来源</button>
+            <button type="button" class="seg-btn" data-source="desktop">桌面端</button>
+            <button type="button" class="seg-btn" data-source="cli">CLI</button>
+          </div>
+          <span id="hist-source-meta" class="muted xs num">—</span>
+        </div>
+
+        <!-- 4 Summary KPI Cards -->
+        <div class="kpi-grid">
+          <div class="card kpi-card">
+            <div class="kpi-head"><span>累计处理 Token</span><span class="kpi-tag">TOTAL</span></div>
+            <div id="kpi-total" class="kpi-val">—</div>
+            <div id="kpi-total-sub" class="kpi-sub">—</div>
+            <div id="kpi-total-cost" class="kpi-cost">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-head"><span>今日使用</span><span class="kpi-tag sky">TODAY</span></div>
+            <div id="kpi-today" class="kpi-val">—</div>
+            <div id="kpi-today-sub" class="kpi-sub">—</div>
+            <div id="kpi-today-cost" class="kpi-cost">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-head"><span>本月使用</span><span class="kpi-tag">MONTH</span></div>
+            <div id="kpi-month" class="kpi-val">—</div>
+            <div id="kpi-month-sub" class="kpi-sub">—</div>
+            <div id="kpi-month-cost" class="kpi-cost">—</div>
+          </div>
+          <div class="card kpi-card">
+            <div class="kpi-head"><span>年度使用</span><span class="kpi-tag">YEAR</span></div>
+            <div id="kpi-year" class="kpi-val">—</div>
+            <div id="kpi-year-sub" class="kpi-sub">—</div>
+            <div id="kpi-year-cost" class="kpi-cost">—</div>
+          </div>
+        </div>
+
+        <!-- Multi-View Interactive Activity Card -->
+        <article class="card">
+          <div class="chart-toolbar">
+            <div class="chart-title-row">
+              <h2 class="card-title">Token 活跃趋势</h2>
+              <span id="first-use-pill" class="meta-chip">首次记录：—</span>
+            </div>
+            <div class="seg-group" id="chart-mode-seg" role="tablist" aria-label="图表周期切换">
+              <button type="button" class="seg-btn active" data-chart="daily">每天</button>
+              <button type="button" class="seg-btn" data-chart="weekly">每周</button>
+              <button type="button" class="seg-btn" data-chart="monthly">每月</button>
+              <button type="button" class="seg-btn" data-chart="yearly">今年</button>
+              <button type="button" class="seg-btn" data-chart="cumulative">累计</button>
+            </div>
+          </div>
+
+          <div id="heat-nav-row" class="heat-nav-row">
+            <button id="btn-heat-prev" type="button" class="ghost-btn xs" disabled>‹ 前一年</button>
+            <span id="heat-range-label" class="muted xs num">—</span>
+            <button id="btn-heat-next" type="button" class="ghost-btn xs" disabled>后一年 ›</button>
+          </div>
+
+          <div id="chart-stage" class="chart-stage"></div>
+
+          <!-- Selected / Hovered Day Inspector -->
+          <div id="day-inspector" class="day-inspector">
+            <span class="muted">点击或悬浮任一日期格 / 柱条查看当日输入、缓存、输出与折算明细</span>
+          </div>
+
+          <!-- Period Summary Strip -->
+          <div class="summary-ribbon">
+            <div class="rib-cell"><span class="muted">区间合计</span><strong id="sum-tok" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted">参考折算</span><strong id="sum-cost" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted">自然日均</span><strong id="sum-daily" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted">活跃日均</span><strong id="sum-active" class="num">—</strong></div>
+            <div class="rib-cell"><span class="muted">订阅性价比</span><strong id="sum-ratio" class="num accent-text">—</strong></div>
+          </div>
+
+          <div class="legend-bar">
+            <span class="muted xs">含缓存读取 Token；点击右侧色块可直接自定义色阶</span>
+            <div class="heat-legend" id="heat-legend">
+              <span class="xs muted">少</span>
+              <button type="button" class="leg-box" data-leg-slot="0" title="点击修改第 1 档颜色"></button>
+              <button type="button" class="leg-box" data-leg-slot="1" title="点击修改第 2 档颜色"></button>
+              <button type="button" class="leg-box" data-leg-slot="2" title="点击修改第 3 档颜色"></button>
+              <button type="button" class="leg-box" data-leg-slot="3" title="点击修改第 4 档颜色"></button>
+              <button type="button" class="leg-box" data-leg-slot="4" title="点击修改第 5 档颜色"></button>
+              <span class="xs muted">多</span>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <!-- ==================== TAB 3: API COST & SUBSCRIPTION ==================== -->
+      <section id="panel-cost" class="tab-panel" role="tabpanel">
+        <!-- Card 1: Subscription Plan & Quota Pools -->
+        <article class="card">
+          <div class="card-head">
+            <div class="title-group">
+              <h2 class="card-title">AI 订阅与额度池状态</h2>
+              <span id="plan-tier-badge" class="status-pill good">读取中</span>
+            </div>
+            <button id="btn-toggle-plan-form" type="button" class="ghost-btn xs">自定义订阅设置 ✎</button>
+          </div>
+
+          <div class="plan-banner">
+            <div>
+              <div id="plan-headline" class="plan-headline">—</div>
+              <div id="plan-subline" class="muted xs">—</div>
+            </div>
+            <div class="plan-price-box">
+              <div id="plan-price-main" class="plan-price-main">—</div>
+              <div id="plan-price-cny" class="muted xs num">—</div>
+            </div>
+          </div>
+
+          <div id="plan-kv" class="kv-grid compact"></div>
+
+          <!-- Model Quota Pools List -->
+          <div id="quota-pools-wrap" class="quota-pools-wrap hidden">
+            <div class="sub-heading">实时模型配额池余量</div>
+            <div id="quota-pools-list" class="quota-pools-list"></div>
+          </div>
+
+          <!-- Inline Subscription Customizer Form -->
+          <form id="plan-form" class="plan-form hidden">
+            <div class="sub-heading no-margin">编辑当前账号订阅与实付参数（仅保存在本机插件目录）</div>
+            <div class="form-grid">
+              <label class="f-field">
+                <span>快捷套用国家 / 地区参考价</span>
+                <select id="f-region-preset"></select>
+              </label>
+              <label class="f-field">
+                <span>获取方式 / 权益渠道</span>
+                <select id="f-acquisition"></select>
+              </label>
+              <label class="f-field">
+                <span>账号所属地区（本地备注）</span>
+                <input id="f-account-country" type="text" placeholder="如：美国 (US)">
+              </label>
+              <label class="f-field">
+                <span>自定义渠道名称（选填）</span>
+                <input id="f-acq-name" type="text" placeholder="如：Pixel 11 Pro 赠送">
+              </label>
+              <label class="f-field">
+                <span>计价模式</span>
+                <select id="f-price-mode">
+                  <option value="preset">跟随所选地区参考价</option>
+                  <option value="custom">手动指定实付金额</option>
+                </select>
+              </label>
+              <label class="f-field">
+                <span>结算币种与实付金额</span>
+                <div class="inline-pair">
+                  <select id="f-currency"></select>
+                  <input id="f-paid" type="number" step="0.01" min="0" placeholder="金额">
+                </div>
+              </label>
+              <label class="f-field">
+                <span>计费周期</span>
+                <select id="f-cycle">
+                  <option value="月付">月付</option>
+                  <option value="年付">年付（自动按 1/12 折算月均）</option>
+                  <option value="免费权益">免费 / 活动赠送</option>
+                </select>
+              </label>
+              <label class="f-field">
+                <span>权益到期日（选填）</span>
+                <input id="f-valid-until" type="date">
+              </label>
+            </div>
+            <label class="check-row">
+              <input id="f-zero-extra" type="checkbox">
+              <span>本权益期内无需额外支付订阅费（实付记为 0）</span>
+            </label>
+            <label class="f-field">
+              <span>备注说明（选填）</span>
+              <input id="f-note" type="text" placeholder="如：家庭组拼车 / 学生优惠首年">
+            </label>
+            <div class="form-actions">
+              <button id="btn-clear-plan" type="button" class="ghost-btn danger xs">清除自定义</button>
+              <div class="row-gap">
+                <button id="btn-cancel-plan" type="button" class="ghost-btn xs">取消</button>
+                <button type="submit" class="primary-btn xs">保存设置</button>
+              </div>
+            </div>
+          </form>
+        </article>
+
+        <!-- Card 2: API Reference Cost & Subscription Comparison -->
+        <article class="card">
+          <div class="card-head wrap-gap">
+            <div class="title-group">
+              <h2 class="card-title">API 等值参考金额</h2>
+              <span class="meta-chip">API 零售折算 · 非实际账单</span>
+            </div>
+            <div class="row-gap">
+              <div class="seg-group" id="cost-scope-seg">
+                <button type="button" class="seg-btn active" data-scope="period">本期自然月</button>
+                <button type="button" class="seg-btn" data-scope="allTime">全量历史</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="mode-row">
+            <span class="muted xs">估值模式</span>
+            <div class="seg-group" id="cost-mode-seg">
+              <button type="button" class="seg-btn active" data-cmode="hybrid">混合精确折算</button>
+              <button type="button" class="seg-btn" data-cmode="identified">仅已识别模型</button>
+              <button type="button" class="seg-btn" data-cmode="reference">统一按 Flash 基准</button>
+            </div>
+          </div>
+
+          <div class="cost-hero">
+            <div>
+              <div id="cost-big-usd" class="cost-big-usd">$0.00</div>
+              <div id="cost-big-cny" class="muted xs num">折合人民币约 ¥0.00</div>
+            </div>
+            <div class="cost-coverage-box">
+              <span id="cost-cov-pill" class="status-pill good">100% 覆盖</span>
+              <span id="cost-scope-label" class="muted xs">—</span>
+            </div>
+          </div>
+
+          <!-- Subscription vs API Value Comparison Bar -->
+          <div id="sub-compare-box" class="compare-box">
+            <div class="compare-head">
+              <span id="compare-title">API 等值用量 vs 订阅实付支出</span>
+              <strong id="compare-diff" class="num accent-text">—</strong>
+            </div>
+            <div class="dual-bars">
+              <div class="dual-row">
+                <span class="dual-lbl">API 折算</span>
+                <div class="thin-track"><div id="bar-api-val" class="thin-fill accent"></div></div>
+                <span id="lbl-api-val" class="dual-num num">—</span>
+              </div>
+              <div class="dual-row">
+                <span class="dual-lbl">订阅实付</span>
+                <div class="thin-track"><div id="bar-sub-val" class="thin-fill muted-fill"></div></div>
+                <span id="lbl-sub-val" class="dual-num num">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3-Column Category Formula Breakdown -->
+          <div class="three-grid">
+            <div class="stat-tile">
+              <span class="m-label">输入 Token</span>
+              <span id="cat-in-cost" class="m-val">$0.00</span>
+              <span id="cat-in-tok" class="m-sub">0 tok</span>
+            </div>
+            <div class="stat-tile">
+              <span class="m-label">缓存读取（优惠）</span>
+              <span id="cat-cache-cost" class="m-val accent-text">$0.00</span>
+              <span id="cat-cache-tok" class="m-sub">0 tok</span>
+            </div>
+            <div class="stat-tile">
+              <span class="m-label">输出 Token（含思考）</span>
+              <span id="cat-out-cost" class="m-val">$0.00</span>
+              <span id="cat-out-tok" class="m-sub">0 tok</span>
+            </div>
+          </div>
+
+          <!-- Model Usage Leaderboard -->
+          <div class="sub-heading">分模型消耗与折算分布</div>
+          <div id="model-leaderboard" class="model-list"></div>
+
+          <p class="fine-print">
+            注：API 等值金额按 Google / Anthropic 公开标准单价估算（缓存读取按优惠费率计价，输出已含推理思考 Token），仅用于评估使用强度，包月订阅或赠送权益与按量零售并非同类计费，差额不代表实际现金退补。
+          </p>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js?v=1.6.1"></script>
+</body>
+</html>

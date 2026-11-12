@@ -1,0 +1,18 @@
+{
+  "name": "context-viewer",
+  "displayName": "上下文与 Token 看板",
+  "version": "1.6.1",
+  "description": "实时查看 Antigravity 桌面端与 agy CLI 的会话上下文占用、生成速度（TTFT / tok/s）、逐轮消耗时间线、Token 历史热力图与 API 订阅折算对比，支持 macOS 顶部菜单栏常驻图标（可定制切换上下文占比 / 速度与耗时 / 5h 或 Week 额度，切换会话自动跟随）与右侧独立置顶小窗。",
+  "author": {
+    "name": "Dong-Kevin",
+    "url": "https://github.com/Dong-Kevin"
+  },
+  "homepage": "https://github.com/Dong-Kevin/agy-context-viewer",
+  "repository": "https://github.com/Dong-Kevin/agy-context-viewer",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开上下文与 Token 看板面板",
+    "查看当前会话的上下文占用、缓存命中率与 API 折算费用",
+    "汇总本机桌面端与 agy CLI 的 Token 历史用量和模型消耗排行"
+  ]
+}

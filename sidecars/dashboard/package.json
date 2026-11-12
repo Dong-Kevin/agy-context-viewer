@@ -1,0 +1,7 @@
+{
+  "name": "context-viewer-dashboard",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Official Antigravity UI Sidecar for Context & Token Usage Analytics"
+}

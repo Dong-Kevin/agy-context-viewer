@@ -1,0 +1,17 @@
+# Runtime user state & caches (never commit personal data)
+sidecars/dashboard/data/
+data/
+
+# Build & release artifacts
+dist/
+*.zip
+*.tar.gz
+*.sha256
+
+# Dependencies & OS metadata
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak

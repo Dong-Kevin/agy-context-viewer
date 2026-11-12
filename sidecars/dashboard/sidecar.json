@@ -1,0 +1,26 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "上下文与 Token 看板",
+  "description": "实时查看当前会话上下文占用、模型生成速度（TTFT / tok/s）、逐轮消耗时间线、Token 历史热力图与 API 订阅折算对比，支持顶部菜单栏水位与右侧置顶小窗。",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "上下文与 Token 看板",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "上下文看板"
+      },
+      {
+        "path": "/sidebar",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_SIDEBAR",
+        "title": "上下文看板"
+      }
+    ]
+  }
+}
