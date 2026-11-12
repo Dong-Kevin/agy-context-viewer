@@ -705,7 +705,12 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
     }
   } else if (mode === 'quota') {
     const q = cx?.quota || (Array.isArray(snap?.quotas) && snap.quotas.length ? snap.quotas[0] : null);
-    if (q && typeof q.remainingPercent === 'number') {
+    if (q && q.weekly && typeof q.weekly.remainingPercent === 'number' && typeof q.remainingPercent === 'number') {
+      const p5 = Math.max(0, Math.min(100, Math.round(q.remainingPercent)));
+      const pW = Math.max(0, Math.min(100, Math.round(q.weekly.remainingPercent)));
+      const icon = Math.min(p5, pW) <= 15 ? '⚠ ' : '⏳ ';
+      title = `${icon}5h ${p5}%·周${pW}%`;
+    } else if (q && typeof q.remainingPercent === 'number') {
       const remPct = Math.max(0, Math.min(100, Math.round(q.remainingPercent)));
       const { winTag, countdown } = fmtQuotaWindowAndCountdown(q.resetTime);
       const icon = remPct <= 15 ? '⚠ ' : '⏳ ';
@@ -746,17 +751,23 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
   const pools = Array.isArray(snap?.quotas) ? snap.quotas : [];
   if (pools.length) {
     for (const pool of pools.slice(0, 3)) {
-      if (typeof pool.remainingPercent === 'number') {
+      const poolName = summarizePoolShortLabel(pool);
+      if (pool.fiveHour && pool.weekly) {
+        quotaLines.push(`${poolName}：5h ${pool.fiveHour.remainingPercent}% · 周 ${pool.weekly.remainingPercent}%`);
+      } else if (typeof pool.remainingPercent === 'number') {
         const { winTag, countdown } = fmtQuotaWindowAndCountdown(pool.resetTime);
-        const poolName = summarizePoolShortLabel(pool);
         const rst = countdown ? ` · ${countdown} 重置` : '';
         quotaLines.push(`${poolName} (${winTag})：${pool.remainingPercent}%${rst}`);
       }
     }
   } else if (cx?.quota && typeof cx.quota.remainingPercent === 'number') {
-    const { winTag, countdown } = fmtQuotaWindowAndCountdown(cx.quota.resetTime);
     const qName = truncateDisplayCols(cx.quota.label || '当前配额', 14);
-    quotaLines.push(`${qName} (${winTag})：${cx.quota.remainingPercent}%${countdown ? ` · ${countdown} 重置` : ''}`);
+    if (cx.quota.weekly && typeof cx.quota.weekly.remainingPercent === 'number') {
+      quotaLines.push(`${qName}：5h ${cx.quota.remainingPercent}% · 周 ${cx.quota.weekly.remainingPercent}%`);
+    } else {
+      const { winTag, countdown } = fmtQuotaWindowAndCountdown(cx.quota.resetTime);
+      quotaLines.push(`${qName} (${winTag})：${cx.quota.remainingPercent}%${countdown ? ` · ${countdown} 重置` : ''}`);
+    }
   }
   if (quotaLines.length) {
     sections.push(quotaLines.join('\n'));

@@ -780,15 +780,22 @@
     if (qBox) {
       if (q && typeof q.remainingPercent === 'number') {
         qBox.classList.remove('hidden');
-        setText('ctx-quota-title', `${q.label} 配额池余量`);
-        const resetNote = q.resetTimeZh ? ` · ${q.resetTimeZh}重置` : '';
-        setText('ctx-quota-val', `${q.remainingPercent.toFixed(1)}%${resetNote}`);
+        setText('ctx-quota-title', `${q.label} 配额余量`);
+        if (q.weekly && typeof q.weekly.remainingPercent === 'number') {
+          setText('ctx-quota-val', `5h ${q.remainingPercent.toFixed(1)}% · 周 ${q.weekly.remainingPercent.toFixed(1)}%`);
+        } else {
+          const resetNote = q.resetTimeZh ? ` · ${q.resetTimeZh}重置` : '';
+          setText('ctx-quota-val', `${q.remainingPercent.toFixed(1)}%${resetNote}`);
+        }
+        const barPct = q.weekly && typeof q.weekly.remainingPercent === 'number'
+          ? Math.min(q.remainingPercent, q.weekly.remainingPercent)
+          : q.remainingPercent;
         const bar = $('ctx-quota-bar');
         if (bar) {
-          bar.style.width = `${Math.min(100, Math.max(0, q.remainingPercent))}%`;
-          bar.style.background = q.remainingPercent <= 15
+          bar.style.width = `${Math.min(100, Math.max(0, barPct))}%`;
+          bar.style.background = barPct <= 15
             ? 'var(--danger)'
-            : q.remainingPercent <= 40
+            : barPct <= 40
               ? 'var(--warn)'
               : 'var(--good)';
         }
@@ -1576,18 +1583,28 @@
     const badge = $('plan-tier-badge');
     if (badge) {
       badge.className = `status-pill ${plan.status === 'identified' ? 'good' : 'neutral'}`;
-      setText(badge, plan.isCustomized ? '已自定义实付' : (plan.status === 'identified' ? '自动识别' : '待补充'));
+      setText(badge, plan.isCustomized ? '已自定义实付' : (plan.status === 'identified' ? '档位已识别' : '待补充'));
     }
 
     setText('plan-headline', plan.tierName || '未识别订阅');
-    setText('plan-subline', `${plan.subscriptionRegionName || '默认美区'} · ${plan.acquisitionLabel || '常规订阅'}`);
+    setText(
+      'plan-subline',
+      plan.isCustomized
+        ? `${plan.subscriptionRegionName || '默认美区'} · ${plan.acquisitionLabel || '常规订阅'}`
+        : '默认公开参考价 · 家庭组共享 / 拼车点右上角设置'
+    );
 
     if (plan.monthlyNormalized === 0) {
       setText('plan-price-main', `${plan.symbol || '$'}0 / 月`);
       setText('plan-price-cny', '免额外订阅费（¥0.00）');
     } else if (plan.monthlyNormalized !== null && plan.monthlyNormalized !== undefined) {
       setText('plan-price-main', `${plan.symbol || '$'}${plan.monthlyNormalized} / 月`);
-      setText('plan-price-cny', `折合人民币约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`);
+      setText(
+        'plan-price-cny',
+        plan.isCustomized
+          ? `实付折合人民币约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`
+          : `公开参考约 ¥${(plan.monthlyCNY ?? 0).toFixed(2)} / 月`
+      );
     } else {
       setText('plan-price-main', '待指定金额');
       setText('plan-price-cny', plan.priceRangeNote || '--');
@@ -1601,8 +1618,16 @@
 
     const planRows = [
       ['当前账号（脱敏）', plan.maskedEmail || '本机已登录会话'],
-      ['计价地区与周期', `${plan.subscriptionRegionName || '--'} · ${plan.billingCycle || '月付'}`],
-      ['权益获取渠道', plan.acquisitionLabel || '--'],
+      [
+        plan.isCustomized ? '计价地区与周期' : '默认参考基准',
+        plan.isCustomized
+          ? `${plan.subscriptionRegionName || '--'} · ${plan.billingCycle || '月付'}`
+          : `${plan.subscriptionRegionName || '美国 (US)'} 标准价（客户端 API 不返回家庭组与账单实付）`
+      ],
+      [
+        '权益获取渠道',
+        plan.isCustomized ? (plan.acquisitionLabel || '--') : '未指定（支持设为家庭组共享 / AA 拼车 / 赠送）'
+      ],
       ['Prompt Credits（可用 / 月度）', fmtCredit(plan.promptCredits)],
       ['Flow Credits（可用 / 月度）', fmtCredit(plan.flowCredits)]
     ];
@@ -1619,25 +1644,65 @@
       ).join('');
     }
 
-    // Live Model Quota Pools
+    // Live Model Quota Pools (5h burst window + Weekly tier/family shared pool)
     const qWrap = $('quota-pools-wrap');
     const qList = $('quota-pools-list');
     if (qWrap && qList) {
       if (quotas.length > 0) {
+        const barColor = (p) => (p <= 15 ? 'var(--danger)' : p <= 40 ? 'var(--warn)' : 'var(--good)');
         qWrap.classList.remove('hidden');
         qList.innerHTML = quotas.map((pool) => {
           const pct = pool.remainingPercent ?? 100;
-          const col = pct <= 15 ? 'var(--danger)' : pct <= 40 ? 'var(--warn)' : 'var(--good)';
-          const label = (pool.models || []).slice(0, 3).join(' / ');
-          const extra = (pool.models?.length || 0) > 3 ? ` 等 ${pool.models.length} 个模型` : '';
-          const resetStr = pool.resetTimeZh ? ` · ${pool.resetTimeZh}重置` : '';
+          const modelLabels = (pool.models || [])
+            .map((m) => (typeof m === 'string' ? m : (m?.label || m?.modelId || '')))
+            .filter(Boolean);
+          const families = Array.isArray(pool.families) && pool.families.length
+            ? pool.families
+            : [...new Set(modelLabels.map((n) => n.replace(/\s*\((Low|Medium|High)\)\s*$/i, '').trim()))];
+          const label = families.length <= 3
+            ? families.join(' / ')
+            : `${families.slice(0, 3).join(' / ')} 等 ${families.length} 组`;
+          const variantCount = pool.modelsCount || modelLabels.length;
+          const hoverDetail = modelLabels.length ? `包含档位：${modelLabels.join('、')}` : label;
+
+          if (pool.fiveHour && pool.weekly) {
+            const p5 = pool.fiveHour.remainingPercent ?? pct;
+            const pW = pool.weekly.remainingPercent ?? 100;
+            const r5 = pool.fiveHour.resetTimeZh ? `${pool.fiveHour.resetTimeZh} 重置` : '5h 滚动重置';
+            const rW = pool.weekly.resetTimeZh ? `${pool.weekly.resetTimeZh} 重置` : '按周重置';
+            return (
+              `<div class="quota-inline" title="${escZh(hoverDetail)}">` +
+              `<div class="quota-inline-head">` +
+              `<span class="quota-name">${escZh(label)}</span>` +
+              `<span class="quota-tag">${escZh(`共 ${variantCount} 档`)}</span>` +
+              `</div>` +
+              `<div class="quota-win-block">` +
+              `<div class="quota-inline-sub"><span>${escZh('5 小时滚动限额')}</span><span class="num-strong">${escZh(`${p5.toFixed(1)}% · ${r5}`)}</span></div>` +
+              `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, p5))}%;background:${barColor(p5)}"></div></div>` +
+              `</div>` +
+              `<div class="quota-win-block">` +
+              `<div class="quota-inline-sub"><span>${escZh('Week 周度总额度（档位共享池）')}</span><span class="num-strong">${escZh(`${pW.toFixed(1)}% · ${rW}`)}</span></div>` +
+              `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, pW))}%;background:${barColor(pW)}"></div></div>` +
+              `</div>` +
+              `</div>`
+            );
+          }
+
+          const subLeft = variantCount > families.length
+            ? `共享配额池 · 含 ${variantCount} 个模型档位`
+            : `共享配额池 · ${variantCount || families.length} 个模型`;
+          const resetStr = pool.resetTimeZh ? `${pool.resetTimeZh} 重置` : '自动周期重置';
           return (
-            `<div class="quota-inline">` +
+            `<div class="quota-inline" title="${escZh(hoverDetail)}">` +
             `<div class="quota-inline-head">` +
-            `<span class="quota-name">${escZh(`${label}${extra}`)}</span>` +
-            `<span class="num-strong">${escZh(`${pct.toFixed(1)}%${resetStr}`)}</span>` +
+            `<span class="quota-name">${escZh(label)}</span>` +
+            `<span class="num-strong quota-val">${escZh(`${pct.toFixed(1)}%`)}</span>` +
             `</div>` +
-            `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, pct))}%;background:${col}"></div></div>` +
+            `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, pct))}%;background:${barColor(pct)}"></div></div>` +
+            `<div class="quota-inline-sub">` +
+            `<span>${escZh(subLeft)}</span>` +
+            `<span class="num">${escZh(resetStr)}</span>` +
+            `</div>` +
             `</div>`
           );
         }).join('');
@@ -2169,7 +2234,10 @@
       if (found) {
         if ($('f-currency')) $('f-currency').value = found.currency;
         if ($('f-price-mode')?.value === 'preset' && $('f-paid')) {
-          $('f-paid').value = found.monthlyPrice;
+          const tierKey = state.historyData?.planStatus?.tierKey || 'pro';
+          $('f-paid').value = tierKey === 'ultra' && typeof found.ultraMonthlyPrice === 'number'
+            ? found.ultraMonthlyPrice
+            : found.monthlyPrice;
         }
       }
     });
@@ -2177,8 +2245,13 @@
     $('f-acquisition')?.addEventListener('change', (ev) => {
       const acqs = state.historyData?.presets?.acquisitions || state.settingsData?.presets?.acquisitions || [];
       const found = acqs.find((a) => a.id === ev.target.value);
-      if (found && found.defaultPaid === 0 && $('f-zero-extra')) {
+      if (!found) return;
+      if (found.defaultPaid === 0 && $('f-zero-extra')) {
         $('f-zero-extra').checked = true;
+      } else if (found.id === 'family_split' || found.id === 'official_promo' || found.id === 'custom_source') {
+        if ($('f-zero-extra')) $('f-zero-extra').checked = false;
+        if ($('f-price-mode')) $('f-price-mode').value = 'custom';
+        $('f-paid')?.focus();
       }
     });
 

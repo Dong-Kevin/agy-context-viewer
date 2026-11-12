@@ -95,7 +95,7 @@ function normalizeMenubarModeArg(raw) {
 
 function printHelp() {
   const lines = [
-    `${c.bold}Antigravity Context & Token Viewer CLI (v1.6.1)${c.reset}`,
+    `${c.bold}Antigravity Context & Token Viewer CLI (v1.6.2)${c.reset}`,
     '',
     '用法：',
     '  agy-context [status] [conversationId]           终端可视化汇总（自动识别桌面端与 agy CLI 最新活跃会话）',
@@ -357,7 +357,7 @@ function printPrettyStatus(ctx, hist) {
   const srcBadge = cv.source === 'cli' ? '[CLI]' : '[Desktop]';
 
   const out = [];
-  out.push(`${c.bold}${c.magenta}◈ 上下文与 Token 看板${c.reset} ${c.dim}(v1.6.1 · Desktop + agy CLI)${c.reset}`);
+  out.push(`${c.bold}${c.magenta}◈ 上下文与 Token 看板${c.reset} ${c.dim}(v1.6.2 · Desktop + agy CLI)${c.reset}`);
   out.push(`${c.dim}${'─'.repeat(64)}${c.reset}`);
 
   if (!cv.id) {

@@ -2,11 +2,19 @@
 
 ## 当前阶段
 
-`v1.6.1` 已完成开源发布准备与多端验证（支持 macOS 顶部系统菜单栏在「当前上下文占比 / 最新生成速度与耗时（均值、峰值） / 5h 或 Week 额度余量」三档间自由定制切换、切换不同或静止会话自动跟随、四段式精简悬停 Tooltip，以及屏幕右侧独立置顶小窗，兼容 Antigravity 桌面端 App / IDE 与 `agy` CLI 一键安装）。
+`v1.6.2` 已完成开发、隐私脱敏与双语文档升级（修复「费用与订阅」页 Google AI Ultra 档位与参考价识别、接入 `RetrieveUserQuotaSummary` 的 `5h + Week` 双维度共享额度池、修复模型配额池 `[object Object]` 序列化，并新增脱敏界面预览图库、中英文双语 README 与先行开源项目致谢）。
 
 ## 阶段里程碑与验收记录
 
 ### 已完成
+
+- [x] **补充脱敏界面截图画廊、重构中英文双语 README 并致敬先行参考项目 (`v1.6.2`)**：
+  - 对 8 张真实运行截图完成像素级敏感信息遮盖与 PNG 元数据剥离（存放在 `docs/images/`，并在 [scripts/verify.mjs](./scripts/verify.mjs) 新增 PNG 元数据块自动审计），保持运行时发布包轻量；
+  - 重构并拆分 [README.md](./README.md)（简体中文）与 [README_EN.md](./README_EN.md)（English），完整展示菜单栏徽章、四段式悬停卡片、右侧置顶小窗与三大视图，并在文末向立项参考项目 [`elviscjn-cjn/antigravity-context-viewer`](https://github.com/elviscjn-cjn/antigravity-context-viewer) 致敬。
+
+- [x] **修正 Google AI Ultra 订阅识别、家庭组快捷设置及 `5h + Week` 双维度配额池 (`v1.6.2`)**：
+  - 修复 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 将宿主内部引擎字段 `planInfo.planName = "Pro"` 误拼接为 `Google AI Ultra · Pro` 且误套用 Pro 档 `$19.99/月` 的问题，现准确显示 `Google AI Ultra`（美区公开标准价 `$249.99/月`），未自定义时明确标注「默认公开参考价（客户端 API 不返回家庭组与账单实付）」，并在自定义表单置顶提供「家庭组共享 / 免额外付费」与「家庭组拼车 / AA 分摊」选项；
+  - 接入宿主 `RetrieveUserQuotaSummary` 只读接口（[collector.mjs](./sidecars/dashboard/collector.mjs)、[app.js](./sidecars/dashboard/app.js)、[float_window.mjs](./sidecars/dashboard/float_window.mjs)），同时展示各模型组的 **5 小时滚动限额** 与 **Week 周度档位共享池余量**，并修复 `pool.models` 对象数组拼接导致的 `[object Object]` 与日期折行问题。
 
 - [x] **开源仓库元数据、一键安装默认源与隐私脱敏发布 (`v1.6.1`)**：完成 [plugin.json](./plugin.json)、[install.sh](./install.sh)、[install.ps1](./install.ps1) 与 [README.md](./README.md) 仓库地址配置，支持零环境变量一键安装，并通过全仓隐私脱敏与自动化冒烟检查。
 - [x] **优化菜单栏与窗口悬停 Tooltip 排版 (`v1.6.1`)**：针对 macOS 原生 `NSStatusBarButton.toolTip` 约 40 显示列折行宽度，重构 [float_window.mjs](./sidecars/dashboard/float_window.mjs) 的 `formatStatusItemFromSnapshot`，采用四段式空行分组（`\n\n`）、剥离冗长 URL 前缀与双层嵌套括号、将多模型配额池归并为 `Gemini 系列` / `Claude / GPT` 简短标签，并将单行严格控制在 `<= 36` 显示列以内（纳入 [scripts/verify.mjs](./scripts/verify.mjs) 自动断言）。
@@ -24,5 +32,6 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs` -- 通过，涵盖清单规范、JS 语法、全仓隐私审计、CSS 命名空间隔离、Tooltip 宽度断言与服务冒烟测试（2026-11-12 14:46 北京时间）
-- `node scripts/package-release.mjs` -- 通过，生成 `dist/context-viewer-v1.6.1.zip` 与 `.sha256`（2026-11-12 14:46 北京时间）
+- `node scripts/verify.mjs` -- 通过，涵盖 Ultra 档位与家庭组折算、`5h + Week` 双维度配额聚合、全仓文本与 PNG 元数据隐私审计及冒烟测试（2026-11-12 16:18 北京时间）
+- `node scripts/package-release.mjs` -- 通过，生成 `dist/context-viewer-v1.6.2.zip` 与 `.sha256`（2026-11-12 16:18 北京时间）
+- `./install.sh` + 本机守护进程热更新验证 -- 通过，准确展示 `Google AI Ultra`（`$249.99/月` 参考价）与 `5h + Week` 双配额条（2026-11-12 15:18 北京时间）

@@ -122,6 +122,7 @@ function main() {
   const relFiles = [
     ['plugin.json', false],
     ['README.md', false],
+    ['README_EN.md', false],
     ['LICENSE', false],
     ['install.sh', true],
     ['install.ps1', false],

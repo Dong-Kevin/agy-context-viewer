@@ -64,7 +64,7 @@ const fileAuditCache = new Map();       // "realPath|size|mtimeMs" -> attachment
 const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, records, firstDate, stepCount }
 const convGenMetaCache = new Map();     // convId -> { at, callsByStep, latestMeta }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
-let cachedHostStatus = { at: 0, raw: null, plan: null, quotas: [], modelConfigs: [], dynamicModelMap: {} };
+let cachedHostStatus = { at: 0, raw: null, plan: null, quotas: [], modelConfigs: [], quotaSummaryGroups: [], dynamicModelMap: {} };
 let cachedHistoryResult = { at: 0, etag: '', data: null };
 
 export function findAppDataDir() {
@@ -219,24 +219,28 @@ async function getHostUserStatus(force = false) {
   if (!force && cachedHostStatus.at && Date.now() - cachedHostStatus.at < 30_000) {
     return cachedHostStatus;
   }
-  const res = await callLanguageServer('GetUserStatus', {});
+  const [res, quotaSummaryRes] = await Promise.all([
+    callLanguageServer('GetUserStatus', {}),
+    callLanguageServer('RetrieveUserQuotaSummary', {})
+  ]);
   if (!res) {
     return cachedHostStatus.plan
       ? cachedHostStatus
-      : { at: Date.now(), raw: null, plan: parseUserPlanStatus(null), quotas: [], modelConfigs: [], dynamicModelMap: {} };
+      : { at: Date.now(), raw: null, plan: parseUserPlanStatus(null), quotas: [], modelConfigs: [], quotaSummaryGroups: [], dynamicModelMap: {} };
   }
   const plan = parseUserPlanStatus(res);
   const accountHash = hashAccountKey(res?.userStatus?.email || '');
   plan.accountKey = accountHash;
   const modelConfigs = res?.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
+  const quotaSummaryGroups = quotaSummaryRes?.response?.groups || quotaSummaryRes?.groups || [];
   const dynamicModelMap = {};
   for (const cfg of modelConfigs) {
     const mid = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim().toLowerCase();
     const norm = normalizeModelId(cfg.label || '') || normalizeModelId(mid);
     if (mid && norm) dynamicModelMap[mid] = norm;
   }
-  const quotas = groupModelQuotas(modelConfigs);
-  cachedHostStatus = { at: Date.now(), raw: null, plan, quotas, modelConfigs, dynamicModelMap };
+  const quotas = groupModelQuotas(modelConfigs, quotaSummaryGroups);
+  cachedHostStatus = { at: Date.now(), raw: null, plan, quotas, modelConfigs, quotaSummaryGroups, dynamicModelMap };
   return cachedHostStatus;
 }
 
@@ -1386,7 +1390,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     ? Number((((latestValidTurn?.cacheTokens || 0) / promptTotal) * 100).toFixed(1))
     : null;
 
-  const modelQuota = resolveModelQuota(currentModelDisplay, host.modelConfigs);
+  const modelQuota = resolveModelQuota(currentModelDisplay, host.modelConfigs, host.quotaSummaryGroups);
   const unknownAttachmentsCount = attachments.filter((a) => a.status !== 'parsed').length;
 
   // Resolve workspace URI via official agentapi if available (cached per conversation)

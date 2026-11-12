@@ -590,10 +590,37 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 .quota-inline-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 8px;
   font-size: 11.5px;
 }
-.quota-name { color: var(--cv-fg-2); font-weight: 500; }
+.quota-name { color: var(--cv-fg); font-weight: 600; line-height: 1.35; }
+.quota-tag {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--cv-muted);
+  background: var(--cv-surface-3);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.quota-win-block {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 2px;
+}
+.quota-inline-head .num-strong { flex-shrink: 0; white-space: nowrap; text-align: right; }
+.quota-inline-sub {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--cv-muted);
+}
+.quota-inline-sub .num,
+.quota-inline-sub .num-strong { flex-shrink: 0; white-space: nowrap; }
 .thin-track {
   height: 6px;
   width: 100%;

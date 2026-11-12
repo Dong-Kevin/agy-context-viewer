@@ -89,9 +89,30 @@ async function main() {
     { re: /\b(AIza[0-9A-Za-z-_]{35}|ghp_[0-9A-Za-z]{36}|sk-[0-9A-Za-z]{32,})\b/, label: '疑似 API Key / Token' }
   ];
   const verifyRel = relative(ROOT, fileURLToPath(import.meta.url));
+  const binaryExts = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico']);
+  const forbiddenPngChunks = new Set(['tEXt', 'iTXt', 'zTXt', 'eXIf', 'tIME']);
   for (const f of allFiles) {
     const rel = relative(ROOT, f);
     if (rel === verifyRel) continue;
+    const ext = extname(f).toLowerCase();
+    if (binaryExts.has(ext)) {
+      if (ext === '.png') {
+        const buf = readFileSync(f);
+        assert(
+          buf.length >= 8 &&
+            buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47,
+          `PNG 文件签名无效：${rel}`
+        );
+        let offset = 8;
+        while (offset + 8 <= buf.length) {
+          const chunkLen = buf.readUInt32BE(offset);
+          const chunkType = buf.subarray(offset + 4, offset + 8).toString('ascii');
+          assert(!forbiddenPngChunks.has(chunkType), `PNG 图片 ${rel} 残留未剥离的元数据块：${chunkType}`);
+          offset += 12 + chunkLen;
+        }
+      }
+      continue;
+    }
     const st = statSync(f);
     if (st.size > 2 * 1024 * 1024) continue;
     const text = readFileSync(f, 'utf-8');
@@ -101,13 +122,44 @@ async function main() {
     }
   }
 
-  console.log('[verify] 4/5 检查宿主 CSS 变量命名空间隔离...');
+  console.log('[verify] 4/5 检查宿主 CSS 变量命名空间隔离与前端配额池序列化...');
   for (const f of ['styles.css', 'app.js']) {
     const p = join(ROOT, 'sidecars', 'dashboard', f);
     const s = readFileSync(p, 'utf-8');
     const collisions = [...s.matchAll(/var\(--(muted|accent|bg|surface|surface-2|surface-3|fg|fg-2|border-strong)(?![-a-zA-Z0-9_])/g)];
     assert(collisions.length === 0, `${f} 存在未加 --cv- 前缀的易冲突变量引用：${collisions[0]?.[0]}`);
   }
+  const appJsSrc = readFileSync(join(ROOT, 'sidecars', 'dashboard', 'app.js'), 'utf-8');
+  assert(!/\(pool\.models\s*\|\|\s*\[\]\)\.slice\([^)]*\)\.join\(/.test(appJsSrc), 'app.js 直接对 pool.models 对象数组调用 join 会产生 [object Object]');
+  const { groupModelQuotas, parseUserPlanStatus, resolveEffectivePlanStatus } = await import(join(ROOT, 'sidecars', 'dashboard', 'pricing.mjs'));
+  const ultraParsed = parseUserPlanStatus({
+    userStatus: {
+      userTier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+      planStatus: { planInfo: { teamsTier: 'TEAMS_TIER_PRO', planName: 'Pro' } }
+    }
+  });
+  assert(ultraParsed.tierKey === 'ultra' && ultraParsed.tierName === 'Google AI Ultra', `Ultra 档位名称识别异常：${ultraParsed.tierName}`);
+  const ultraDefaultEff = resolveEffectivePlanStatus(ultraParsed, null);
+  assert(ultraDefaultEff.effectivePrice === 249.99 && !ultraDefaultEff.isCustomized, `Ultra 默认参考价异常：${ultraDefaultEff.effectivePrice}`);
+  const ultraFamilyEff = resolveEffectivePlanStatus(ultraParsed, { acquisitionId: 'family_sharing', zeroExtra: true });
+  assert(ultraFamilyEff.monthlyNormalized === 0 && ultraFamilyEff.isCustomized, '家庭组免额外付费折算异常');
+
+  const samplePools = groupModelQuotas([
+    { label: 'Gemini 4 Carbon (High)', modelId: 'M1', quotaInfo: { remainingFraction: 0.934, resetTime: '2026-11-12T07:05:09Z' } },
+    { label: 'Gemini 4 Carbon (Low)', modelId: 'M2', quotaInfo: { remainingFraction: 0.934, resetTime: '2026-11-12T07:05:09Z' } },
+    { label: 'Gemini 3.8 Flash (High)', modelId: 'M3', quotaInfo: { remainingFraction: 0.934, resetTime: '2026-11-12T07:05:09Z' } }
+  ], [
+    {
+      displayName: 'Gemini Models',
+      buckets: [
+        { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.998, resetTime: '2026-11-12T12:05:09Z' },
+        { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.926, resetTime: '2026-11-18T02:35:16Z' }
+      ]
+    }
+  ]);
+  assert(samplePools.length === 1 && Array.isArray(samplePools[0].families) && samplePools[0].families.join(' / ') === 'Gemini 4 Carbon / Gemini 3.8 Flash', 'groupModelQuotas families 聚合结果异常');
+  assert(samplePools[0].fiveHour?.remainingPercent === 99.8 && samplePools[0].weekly?.remainingPercent === 92.6, 'RetrieveUserQuotaSummary 5h + weekly 合并异常');
+  assert(!JSON.stringify(samplePools).includes('[object Object]'), '配额池序列化包含 [object Object]');
 
   console.log('[verify] 5/5 执行菜单栏三模式格式化、CLI 与独立 HTTP 服务冒烟测试...');
   const { formatStatusItemFromSnapshot } = await import(join(ROOT, 'sidecars', 'dashboard', 'float_window.mjs'));

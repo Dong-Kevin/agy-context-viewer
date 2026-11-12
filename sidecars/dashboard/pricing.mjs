@@ -186,7 +186,36 @@ export function formatResetTimeZh(isoStr) {
   }
 }
 
-export function groupModelQuotas(clientModelConfigs = []) {
+function matchQuotaSummaryGroup(textHint, quotaSummaryGroups = []) {
+  if (!Array.isArray(quotaSummaryGroups) || !quotaSummaryGroups.length) return null;
+  const s = String(textHint || '').toLowerCase();
+  const wantGemini = s.includes('gemini');
+  const want3p = s.includes('claude') || s.includes('gpt') || s.includes('opus') || s.includes('sonnet');
+  for (const g of quotaSummaryGroups) {
+    const gText = `${g.displayName || ''} ${g.description || ''} ${g.buckets?.[0]?.bucketId || ''}`.toLowerCase();
+    if (wantGemini && gText.includes('gemini')) return g;
+    if (want3p && (gText.includes('claude') || gText.includes('gpt') || gText.includes('3p'))) return g;
+  }
+  return null;
+}
+
+function extractSummaryBuckets(summaryGroup) {
+  if (!summaryGroup || !Array.isArray(summaryGroup.buckets)) return { fiveHour: null, weekly: null };
+  const b5h = summaryGroup.buckets.find((b) => b.window === '5h' || /5h/i.test(b.bucketId || ''));
+  const bWk = summaryGroup.buckets.find((b) => b.window === 'weekly' || /week/i.test(b.bucketId || ''));
+  const toWin = (b) => {
+    if (!b || typeof b.remainingFraction !== 'number') return null;
+    return {
+      remainingFraction: b.remainingFraction,
+      remainingPercent: Number((b.remainingFraction * 100).toFixed(1)),
+      resetTime: b.resetTime || null,
+      resetTimeZh: formatResetTimeZh(b.resetTime)
+    };
+  };
+  return { fiveHour: toWin(b5h), weekly: toWin(bWk) };
+}
+
+export function groupModelQuotas(clientModelConfigs = [], quotaSummaryGroups = []) {
   if (!Array.isArray(clientModelConfigs) || !clientModelConfigs.length) return [];
   const pools = new Map();
   for (const cfg of clientModelConfigs) {
@@ -217,21 +246,25 @@ export function groupModelQuotas(clientModelConfigs = []) {
   return [...pools.values()].map((p) => {
     const fams = [...p.families];
     const poolTitle = fams.length <= 3 ? fams.join(' / ') : `${fams.slice(0, 2).join(' / ')} 等 ${fams.length} 组`;
+    const matchedGroup = matchQuotaSummaryGroup(fams.join(' '), quotaSummaryGroups);
+    const { fiveHour, weekly } = extractSummaryBuckets(matchedGroup);
     return {
       id: p.id,
       title: `${poolTitle} 配额池`,
       families: fams,
       modelsCount: p.models.length,
-      remainingFraction: p.remainingFraction,
-      remainingPercent: p.remainingPercent,
-      resetTime: p.resetTime,
-      resetTimeZh: p.resetTimeZh,
+      remainingFraction: fiveHour ? fiveHour.remainingFraction : p.remainingFraction,
+      remainingPercent: fiveHour ? fiveHour.remainingPercent : p.remainingPercent,
+      resetTime: fiveHour ? fiveHour.resetTime : p.resetTime,
+      resetTimeZh: fiveHour ? fiveHour.resetTimeZh : p.resetTimeZh,
+      fiveHour,
+      weekly,
       models: p.models
     };
   });
 }
 
-export function resolveModelQuota(modelNameOrKey, clientModelConfigs = []) {
+export function resolveModelQuota(modelNameOrKey, clientModelConfigs = [], quotaSummaryGroups = []) {
   if (!Array.isArray(clientModelConfigs) || !clientModelConfigs.length || !modelNameOrKey) return null;
   const targetLower = String(modelNameOrKey).trim().toLowerCase();
   const targetNorm = normalizeModelId(modelNameOrKey);
@@ -249,13 +282,18 @@ export function resolveModelQuota(modelNameOrKey, clientModelConfigs = []) {
   if (!matched) return null;
   const qi = matched.quotaInfo || {};
   const rem = typeof qi.remainingFraction === 'number' ? qi.remainingFraction : null;
+  const displayLabel = matched.label || formatModelDisplayName(modelNameOrKey, targetNorm);
+  const matchedGroup = matchQuotaSummaryGroup(`${displayLabel} ${targetNorm || ''}`, quotaSummaryGroups);
+  const { fiveHour, weekly } = extractSummaryBuckets(matchedGroup);
   return {
-    label: matched.label || formatModelDisplayName(modelNameOrKey, targetNorm),
+    label: displayLabel,
     modelKey: targetNorm,
-    remainingFraction: rem,
-    remainingPercent: rem !== null ? Number((rem * 100).toFixed(1)) : null,
-    resetTime: qi.resetTime || null,
-    resetTimeZh: formatResetTimeZh(qi.resetTime)
+    remainingFraction: fiveHour ? fiveHour.remainingFraction : rem,
+    remainingPercent: fiveHour ? fiveHour.remainingPercent : (rem !== null ? Number((rem * 100).toFixed(1)) : null),
+    resetTime: fiveHour ? fiveHour.resetTime : (qi.resetTime || null),
+    resetTimeZh: fiveHour ? fiveHour.resetTimeZh : formatResetTimeZh(qi.resetTime),
+    fiveHour,
+    weekly
   };
 }
 
@@ -707,42 +745,57 @@ export const CURRENCY_SYMBOLS = {
 };
 
 export const SUBSCRIPTION_ACQUISITION_PRESETS = [
-  { id: 'normal_paid', name: '正常付费订阅', category: 'paid', defaultPaid: 19.99, note: '按月或按年常规付费订阅' },
+  { id: 'normal_paid', name: '个人常规付费订阅', category: 'paid', defaultPaid: null, note: '按月或按年个人官方标准价订阅' },
+  { id: 'family_sharing', name: '家庭组共享 / 他人赠送（免额外付费）', category: 'sharing', defaultPaid: 0, note: '加入 Google One 家庭组共享 Ultra / Pro 额度（个人 $0 实付）' },
+  { id: 'family_split', name: '家庭组拼车 / AA 分摊', category: 'sharing_paid', defaultPaid: null, note: '加入 Google One 家庭组共享额度，按个人实际分摊金额折算' },
   { id: 'student_offer', name: '学生认证优惠', category: 'discount', defaultPaid: 0, note: 'Google One AI 学生专享试用或优惠' },
   { id: 'pixel_bundle', name: 'Google Pixel 设备赠送', category: 'bundle_free', defaultPaid: 0, note: '购机附赠 Google AI Pro 权益' },
   { id: 'chromebook_bundle', name: 'Chromebook Plus 赠送', category: 'bundle_free', defaultPaid: 0, note: '符合资格的 Chromebook Plus 附赠权益' },
   { id: 'samsung_galaxy', name: 'Samsung Galaxy 活动权益', category: 'bundle_free', defaultPaid: 0, note: '指定机型附赠 Google AI 权益' },
   { id: 'jio_offer', name: 'Jio 运营商套餐权益', category: 'partner', defaultPaid: 0, note: '运营商合作绑定 AI 权益' },
   { id: 'partner_carrier', name: '其他运营商 / 合作方权益', category: 'partner', defaultPaid: 0, note: '宽带、通信套餐或第三方平台附赠权益' },
-  { id: 'family_sharing', name: '家庭组共享 / 他人赠送', category: 'sharing', defaultPaid: 0, note: '加入家庭组成员车位或受赠权益' },
-  { id: 'official_promo', name: '官方限时试用 / 促销活动', category: 'promo', defaultPaid: 0, note: '首月免费或官方优惠活动' },
+  { id: 'official_promo', name: '官方限时试用 / 首季优惠', category: 'promo', defaultPaid: null, note: '首月免费、Ultra 首季半价（$124.99）等官方促销' },
   { id: 'custom_source', name: '其他自定义来源', category: 'custom', defaultPaid: null, note: '自定义渠道或企业订阅' }
 ];
 
 export const SUBSCRIPTION_REGIONS_PRESET = [
-  { id: 'US', name: '美国 (US)', currency: 'USD', symbol: '$', monthlyPrice: 19.99, rateToCNY: 6.72, aliases: ['us', 'usa', '美国', '美区'] },
-  { id: 'JP', name: '日本 (JP)', currency: 'JPY', symbol: '¥', monthlyPrice: 2900, rateToCNY: 0.0425, aliases: ['jp', 'japan', '日本', '日区'] },
-  { id: 'KR', name: '韩国 (KR)', currency: 'KRW', symbol: '₩', monthlyPrice: 29000, rateToCNY: 0.0051, aliases: ['kr', 'korea', '韩国', '韩区'] },
-  { id: 'HK', name: '中国香港 (HK)', currency: 'HKD', symbol: 'HK$', monthlyPrice: 158, rateToCNY: 0.857, aliases: ['hk', '香港', '中国香港', '港区'] },
-  { id: 'TW', name: '中国台湾 (TW)', currency: 'TWD', symbol: 'NT$', monthlyPrice: 650, rateToCNY: 0.21, aliases: ['tw', '台湾', '中国台湾', '台区'] },
-  { id: 'SG', name: '新加坡 (SG)', currency: 'SGD', symbol: 'S$', monthlyPrice: 27.99, rateToCNY: 5.12, aliases: ['sg', '新加坡'] },
-  { id: 'AU', name: '澳大利亚 (AU)', currency: 'AUD', symbol: 'AU$', monthlyPrice: 32.99, rateToCNY: 4.45, aliases: ['au', '澳大利亚', '澳洲', '澳区'] },
-  { id: 'GB', name: '英国 (UK)', currency: 'GBP', symbol: '£', monthlyPrice: 18.99, rateToCNY: 8.75, aliases: ['gb', 'uk', '英国', '英区'] },
-  { id: 'EU', name: '欧洲 / 欧元区 (EU)', currency: 'EUR', symbol: '€', monthlyPrice: 21.99, rateToCNY: 7.52, aliases: ['eu', 'eur', '欧洲', '欧盟', '德国', '法国'] },
-  { id: 'CA', name: '加拿大 (CA)', currency: 'CAD', symbol: 'CA$', monthlyPrice: 26.99, rateToCNY: 4.88, aliases: ['ca', '加拿大'] },
-  { id: 'TR', name: '土耳其 (TR)', currency: 'TRY', symbol: '₺', monthlyPrice: 869.99, rateToCNY: 0.133, aliases: ['tr', '土耳其', '土区'] },
-  { id: 'NG', name: '尼日利亚 (NG)', currency: 'NGN', symbol: '₦', monthlyPrice: 28500, rateToCNY: 0.0042, aliases: ['ng', '尼日利亚', '尼区'] },
-  { id: 'PH', name: '菲律宾 (PH)', currency: 'PHP', symbol: '₱', monthlyPrice: 1100, rateToCNY: 0.117, aliases: ['ph', '菲律宾'] },
-  { id: 'IN', name: '印度 (IN)', currency: 'INR', symbol: '₹', monthlyPrice: 1950, rateToCNY: 0.076, aliases: ['in', '印度', '印区'] },
-  { id: 'MY', name: '马来西亚 (MY)', currency: 'MYR', symbol: 'RM ', monthlyPrice: 97.99, rateToCNY: 1.55, aliases: ['my', '马来西亚'] },
-  { id: 'BR', name: '巴西 (BR)', currency: 'BRL', symbol: 'R$', monthlyPrice: 96.99, rateToCNY: 1.18, aliases: ['br', '巴西'] },
-  { id: 'NZ', name: '新西兰 (NZ)', currency: 'NZD', symbol: 'NZ$', monthlyPrice: 34.99, rateToCNY: 4.05, aliases: ['nz', '新西兰'] },
-  { id: 'TH', name: '泰国 (TH)', currency: 'THB', symbol: '฿', monthlyPrice: 750, rateToCNY: 0.20, aliases: ['th', '泰国'] },
-  { id: 'VN', name: '越南 (VN)', currency: 'VND', symbol: '₫', monthlyPrice: 489000, rateToCNY: 0.00028, aliases: ['vn', '越南'] },
-  { id: 'ID', name: '印度尼西亚 (ID)', currency: 'IDR', symbol: 'Rp ', monthlyPrice: 309000, rateToCNY: 0.00044, aliases: ['id', '印尼', '印度尼西亚'] },
-  { id: 'CH', name: '瑞士 (CH)', currency: 'CHF', symbol: 'CHF ', monthlyPrice: 17.00, rateToCNY: 7.85, aliases: ['ch', '瑞士'] },
-  { id: 'CN', name: '中国大陆 / 人民币折算 (CNY)', currency: 'CNY', symbol: '¥', monthlyPrice: 140.00, rateToCNY: 1.0, aliases: ['cn', 'cny', '中国', '中国大陆', '人民币'] }
+  { id: 'US', name: '美国 (US)', currency: 'USD', symbol: '$', monthlyPrice: 19.99, ultraMonthlyPrice: 249.99, rateToCNY: 6.72, aliases: ['us', 'usa', '美国', '美区'] },
+  { id: 'JP', name: '日本 (JP)', currency: 'JPY', symbol: '¥', monthlyPrice: 2900, ultraMonthlyPrice: 36400, rateToCNY: 0.0425, aliases: ['jp', 'japan', '日本', '日区'] },
+  { id: 'KR', name: '韩国 (KR)', currency: 'KRW', symbol: '₩', monthlyPrice: 29000, ultraMonthlyPrice: 360000, rateToCNY: 0.0051, aliases: ['kr', 'korea', '韩国', '韩区'] },
+  { id: 'HK', name: '中国香港 (HK)', currency: 'HKD', symbol: 'HK$', monthlyPrice: 158, ultraMonthlyPrice: 1950, rateToCNY: 0.857, aliases: ['hk', '香港', '中国香港', '港区'] },
+  { id: 'TW', name: '中国台湾 (TW)', currency: 'TWD', symbol: 'NT$', monthlyPrice: 650, ultraMonthlyPrice: 8150, rateToCNY: 0.21, aliases: ['tw', '台湾', '中国台湾', '台区'] },
+  { id: 'SG', name: '新加坡 (SG)', currency: 'SGD', symbol: 'S$', monthlyPrice: 27.99, ultraMonthlyPrice: 348.00, rateToCNY: 5.12, aliases: ['sg', '新加坡'] },
+  { id: 'AU', name: '澳大利亚 (AU)', currency: 'AUD', symbol: 'AU$', monthlyPrice: 32.99, ultraMonthlyPrice: 409.99, rateToCNY: 4.45, aliases: ['au', '澳大利亚', '澳洲', '澳区'] },
+  { id: 'GB', name: '英国 (UK)', currency: 'GBP', symbol: '£', monthlyPrice: 18.99, ultraMonthlyPrice: 234.99, rateToCNY: 8.75, aliases: ['gb', 'uk', '英国', '英区'] },
+  { id: 'EU', name: '欧洲 / 欧元区 (EU)', currency: 'EUR', symbol: '€', monthlyPrice: 21.99, ultraMonthlyPrice: 274.99, rateToCNY: 7.52, aliases: ['eu', 'eur', '欧洲', '欧盟', '德国', '法国'] },
+  { id: 'CA', name: '加拿大 (CA)', currency: 'CAD', symbol: 'CA$', monthlyPrice: 26.99, ultraMonthlyPrice: 339.99, rateToCNY: 4.88, aliases: ['ca', '加拿大'] },
+  { id: 'TR', name: '土耳其 (TR)', currency: 'TRY', symbol: '₺', monthlyPrice: 869.99, ultraMonthlyPrice: 8999.99, rateToCNY: 0.133, aliases: ['tr', '土耳其', '土区'] },
+  { id: 'NG', name: '尼日利亚 (NG)', currency: 'NGN', symbol: '₦', monthlyPrice: 28500, ultraMonthlyPrice: 355000, rateToCNY: 0.0042, aliases: ['ng', '尼日利亚', '尼区'] },
+  { id: 'PH', name: '菲律宾 (PH)', currency: 'PHP', symbol: '₱', monthlyPrice: 1100, ultraMonthlyPrice: 13750, rateToCNY: 0.117, aliases: ['ph', '菲律宾'] },
+  { id: 'IN', name: '印度 (IN)', currency: 'INR', symbol: '₹', monthlyPrice: 1950, ultraMonthlyPrice: 24500, rateToCNY: 0.076, aliases: ['in', '印度', '印区'] },
+  { id: 'MY', name: '马来西亚 (MY)', currency: 'MYR', symbol: 'RM ', monthlyPrice: 97.99, ultraMonthlyPrice: 1199.90, rateToCNY: 1.55, aliases: ['my', '马来西亚'] },
+  { id: 'BR', name: '巴西 (BR)', currency: 'BRL', symbol: 'R$', monthlyPrice: 96.99, ultraMonthlyPrice: 1209.90, rateToCNY: 1.18, aliases: ['br', '巴西'] },
+  { id: 'NZ', name: '新西兰 (NZ)', currency: 'NZD', symbol: 'NZ$', monthlyPrice: 34.99, ultraMonthlyPrice: 439.99, rateToCNY: 4.05, aliases: ['nz', '新西兰'] },
+  { id: 'TH', name: '泰国 (TH)', currency: 'THB', symbol: '฿', monthlyPrice: 750, ultraMonthlyPrice: 9300, rateToCNY: 0.20, aliases: ['th', '泰国'] },
+  { id: 'VN', name: '越南 (VN)', currency: 'VND', symbol: '₫', monthlyPrice: 489000, ultraMonthlyPrice: 6100000, rateToCNY: 0.00028, aliases: ['vn', '越南'] },
+  { id: 'ID', name: '印度尼西亚 (ID)', currency: 'IDR', symbol: 'Rp ', monthlyPrice: 309000, ultraMonthlyPrice: 3850000, rateToCNY: 0.00044, aliases: ['id', '印尼', '印度尼西亚'] },
+  { id: 'CH', name: '瑞士 (CH)', currency: 'CHF', symbol: 'CHF ', monthlyPrice: 17.00, ultraMonthlyPrice: 215.00, rateToCNY: 7.85, aliases: ['ch', '瑞士'] },
+  { id: 'CN', name: '中国大陆 / 人民币折算 (CNY)', currency: 'CNY', symbol: '¥', monthlyPrice: 140.00, ultraMonthlyPrice: 1680.00, rateToCNY: 1.0, aliases: ['cn', 'cny', '中国', '中国大陆', '人民币'] }
 ];
+
+export function getRegionTierMonthlyPrice(regionPreset, tierKey = 'pro') {
+  if (!regionPreset) return null;
+  if (tierKey === 'free') return 0;
+  if (tierKey === 'ultra') {
+    if (typeof regionPreset.ultraMonthlyPrice === 'number') return regionPreset.ultraMonthlyPrice;
+    return Number((regionPreset.monthlyPrice * (249.99 / 19.99)).toFixed(2));
+  }
+  if (tierKey === 'plus') {
+    if (regionPreset.id === 'US') return 4.99;
+    return Number((regionPreset.monthlyPrice * 0.25).toFixed(2));
+  }
+  return regionPreset.monthlyPrice;
+}
 
 const CURRENCY_RATE_TO_CNY = Object.fromEntries(
   SUBSCRIPTION_REGIONS_PRESET.map((r) => [r.currency, r.rateToCNY])
@@ -829,15 +882,11 @@ export function parseUserPlanStatus(raw) {
 
   if (/ultra/i.test(rawTierName) || /ultra/i.test(userTier.id || '')) {
     tierKey = 'ultra';
-    tierName = rawPlanSub && !/ultra/i.test(rawPlanSub) ? `${rawTierName} · ${rawPlanSub}` : (rawTierName || 'Google AI Ultra');
-    // Note: some Antigravity accounts show tier="Google AI Ultra" + plan="Pro" ($19.99/mo or Ultra $249.99/mo)
-    if (/^pro$/i.test(rawPlanSub)) {
-      officialPrice = 19.99;
-      priceRangeNote = '参考价 $19.99/月（或 Ultra 档位，可自定义实付）';
-    } else {
-      officialPrice = 249.99;
-      priceRangeNote = 'Ultra 参考区间 $99.99 ~ $249.99/月';
-    }
+    // Antigravity sets planInfo.planName = "Pro" (internal TEAMS_TIER_PRO engine capability)
+    // on all paid Google One AI plans including Ultra; keep the real Google One tier name.
+    tierName = rawTierName && /ultra/i.test(rawTierName) ? rawTierName : 'Google AI Ultra';
+    officialPrice = 249.99;
+    priceRangeNote = '美区公开参考价 $249.99/月（家庭组共享 / 拼车 / 促销可在右上角设置实付）';
   } else if (/pro/i.test(rawTierName) || /pro/i.test(userTier.id || '')) {
     tierKey = 'pro';
     tierName = 'Google AI Pro';
@@ -881,6 +930,7 @@ export function parseUserPlanStatus(raw) {
 export function resolveEffectivePlanStatus(livePlan, customPlan = null) {
   const base = livePlan || parseUserPlanStatus(null);
   const custom = customPlan && typeof customPlan === 'object' ? customPlan : {};
+  const isCustomized = Boolean(customPlan && Object.keys(customPlan).length > 0);
 
   const subscriptionRegion = custom.subscriptionRegion || custom.region || 'US';
   const regionPreset = findRegionPreset(subscriptionRegion) || SUBSCRIPTION_REGIONS_PRESET[0];
@@ -888,7 +938,9 @@ export function resolveEffectivePlanStatus(livePlan, customPlan = null) {
   const acquisitionId = custom.acquisitionId || 'normal_paid';
   const acqPreset = SUBSCRIPTION_ACQUISITION_PRESETS.find((a) => a.id === acquisitionId) || SUBSCRIPTION_ACQUISITION_PRESETS[0];
   const customAcqName = custom.acquisitionName ? String(custom.acquisitionName).trim() : '';
-  const acquisitionLabel = customAcqName || acqPreset.name;
+  const acquisitionLabel = isCustomized
+    ? (customAcqName || acqPreset.name)
+    : '未指定（默认按公开参考价折算）';
 
   const currency = (custom.currency && CURRENCY_SYMBOLS[custom.currency.toUpperCase()])
     ? custom.currency.toUpperCase()
@@ -907,7 +959,7 @@ export function resolveEffectivePlanStatus(livePlan, customPlan = null) {
   } else if (base.tierKey === 'free') {
     effectivePrice = 0;
   } else if (regionPreset && currency === regionPreset.currency) {
-    effectivePrice = regionPreset.monthlyPrice;
+    effectivePrice = getRegionTierMonthlyPrice(regionPreset, base.tierKey);
   } else if (base.officialPriceMonthly !== null) {
     effectivePrice = base.officialPriceMonthly;
   }
@@ -941,6 +993,6 @@ export function resolveEffectivePlanStatus(livePlan, customPlan = null) {
     monthlyUSD,
     validUntil: custom.validUntil || '',
     note: custom.note || '',
-    isCustomized: Boolean(customPlan && Object.keys(customPlan).length > 0)
+    isCustomized
   };
 }
