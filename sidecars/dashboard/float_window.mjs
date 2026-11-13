@@ -30,13 +30,18 @@ import { fileURLToPath } from 'node:url';
 
 import {
   collectTokenHistory,
+  createLoopbackSessionToken,
   getMenubarMode,
   getMenubarPreference,
   getPluginStateDir,
   getSettings,
   getSidebarEntryStatus,
+  guardLoopbackRequest,
+  injectCsrfMeta,
   launchCliTerminal,
+  LOOPBACK_SECURITY_HEADERS,
   MENUBAR_MODES,
+  readLoopbackJsonBody,
   saveSettings,
   scanConversation,
   setMenubarMode,
@@ -46,7 +51,40 @@ import {
 } from './collector.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DAEMON_VERSION = 4;
+export const DAEMON_VERSION = 5;
+const DAEMON_RUNTIME_FILES = [
+  'pricing.mjs',
+  'collector.mjs',
+  'float_window.mjs',
+  'native_float_macos.swift',
+  'index.html',
+  'styles.css',
+  'app.js'
+];
+
+function computeDaemonBuildId() {
+  const h = createHash('sha256');
+  h.update(`v${DAEMON_VERSION}\n`);
+  for (const name of DAEMON_RUNTIME_FILES) {
+    const p = join(__dirname, name);
+    h.update(`${name}:`);
+    if (existsSync(p)) {
+      h.update(readFileSync(p));
+    }
+    h.update('\n');
+  }
+  return h.digest('hex').slice(0, 16);
+}
+
+export const DAEMON_BUILD_ID = computeDaemonBuildId();
+
+function isDaemonStateCurrent(st) {
+  return Boolean(
+    st &&
+    st.daemonVersion === DAEMON_VERSION &&
+    st.daemonBuildId === DAEMON_BUILD_ID
+  );
+}
 
 const MENUBAR_MODE_LABELS = {
   context: '当前上下文使用占比',
@@ -125,9 +163,9 @@ async function terminateProcessAndWait(pid, timeoutMs = 900) {
   try { rmSync(getStateFilePath(), { force: true }); } catch {}
 }
 
-export function getFloatWindowStatus() {
+export function getFloatWindowStatus(platform = process.platform) {
   const st = readFloatState();
-  const menubarSupported = process.platform === 'darwin';
+  const menubarSupported = platform === 'darwin';
   const prefMenubar = menubarSupported ? getMenubarPreference() : false;
   const prefMode = getMenubarMode();
   if (!st) {
@@ -151,6 +189,8 @@ export function getFloatWindowStatus() {
   return {
     ok: true,
     daemonRunning: true,
+    daemonVersion: st.daemonVersion ?? null,
+    daemonBuildId: st.daemonBuildId ?? null,
     running: windowVisible,
     windowVisible,
     pid: st.pid,
@@ -210,6 +250,22 @@ function resolveStandaloneNodeBinary() {
   return { bin: process.execPath, extraEnv: { ELECTRON_RUN_AS_NODE: '1' } };
 }
 
+function diagnoseMacMenubarFailure() {
+  if (process.platform !== 'darwin') {
+    return '顶部系统菜单栏常驻图标仅支持 macOS 系统';
+  }
+  const errPath = join(getPluginStateDir(), 'last_swiftc_error.txt');
+  if (existsSync(errPath)) {
+    try {
+      const detail = readFileSync(errPath, 'utf-8').trim();
+      if (detail) {
+        return `macOS 原生菜单栏编译未成功（请确认已安装 Xcode Command Line Tools：xcode-select --install）：${detail}`;
+      }
+    } catch {}
+  }
+  return '未能启动 macOS 原生菜单栏守护进程，请确认已安装 Xcode Command Line Tools（运行 xcode-select --install）后重试。';
+}
+
 async function spawnDaemon({ pinned = true, menubarEnabled = true, hiddenWindow = false, menubarMode = '' } = {}) {
   const lockPath = getSpawnLockPath();
   if (existsSync(lockPath)) {
@@ -221,7 +277,7 @@ async function spawnDaemon({ pinned = true, menubarEnabled = true, hiddenWindow 
         while (Date.now() < waitDeadline) {
           await new Promise((r) => setTimeout(r, 80));
           const existing = readFloatState();
-          if (existing?.daemonVersion === DAEMON_VERSION) {
+          if (isDaemonStateCurrent(existing)) {
             return getFloatWindowStatus();
           }
           if (!existsSync(lockPath)) break;
@@ -242,11 +298,14 @@ async function spawnDaemon({ pinned = true, menubarEnabled = true, hiddenWindow 
     if (hiddenWindow) daemonArgs.push('--hidden-window');
 
     const { bin: nodeBin, extraEnv } = resolveStandaloneNodeBinary();
+    let childExited = false;
     const child = spawn(nodeBin, daemonArgs, {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, ...extraEnv }
     });
+    child.on('exit', () => { childExited = true; });
+    child.on('error', () => { childExited = true; });
     child.unref();
 
     // Covers one-time cold-cache swiftc compilation (~2s); cached binary boots in ~80ms
@@ -254,9 +313,10 @@ async function spawnDaemon({ pinned = true, menubarEnabled = true, hiddenWindow 
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 65));
       const st = readFloatState();
-      if (st?.pid && st?.daemonVersion === DAEMON_VERSION) {
+      if (st?.pid && isDaemonStateCurrent(st)) {
         return getFloatWindowStatus();
       }
+      if (childExited) break;
     }
   } finally {
     try { rmSync(lockPath, { force: true }); } catch {}
@@ -265,42 +325,61 @@ async function spawnDaemon({ pinned = true, menubarEnabled = true, hiddenWindow 
   return null;
 }
 
-export async function controlFloatWindow(options = {}) {
+export async function controlFloatWindow(options = {}, deps = {}) {
+  const platform = deps.platform || process.platform;
+  const spawnFn = deps.spawnDaemon || spawnDaemon;
+  const terminateFn = deps.terminateProcess || terminateProcessAndWait;
+  const sendCmdFn = deps.sendDaemonCommand || sendDaemonCommand;
+
   const action = String(options.action || 'toggle').toLowerCase();
   if (action === 'status') {
-    return getFloatWindowStatus();
+    return getFloatWindowStatus(platform);
   }
 
   let current = readFloatState();
   const callerLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+  let upgradedFrom = null;
 
-  // Seamlessly upgrade older daemons OR refresh daemon when Antigravity restarts with a new LS port
+  // Seamlessly upgrade older daemons (version or code/asset fingerprint mismatch)
+  // OR refresh daemon when Antigravity restarts with a new LS port
   if (
     current &&
     action !== 'quit' &&
-    (current.daemonVersion !== DAEMON_VERSION || (callerLsAddr && current.lsAddress !== callerLsAddr))
+    (!isDaemonStateCurrent(current) || (callerLsAddr && current.lsAddress !== callerLsAddr))
   ) {
     const prevVisible = Boolean(current.windowVisible ?? current.running);
     const prevPinned = current.pinned !== false;
-    await terminateProcessAndWait(current.pid);
+    const prevMenubar = Boolean(current.menubarEnabled);
+    const prevMode = MENUBAR_MODES.includes(current.menubarMode) ? current.menubarMode : getMenubarMode();
+    upgradedFrom = { prevVisible, prevPinned, prevMenubar, prevMode };
+    await terminateFn(current.pid);
     current = null;
     if (action === 'ensure-menubar' && prevVisible) {
-      const restarted = await spawnDaemon({
+      const restarted = await spawnFn({
         pinned: prevPinned,
-        menubarEnabled: process.platform === 'darwin' ? getMenubarPreference() : false,
+        menubarEnabled: platform === 'darwin' ? getMenubarPreference() : false,
         hiddenWindow: false,
-        menubarMode: getMenubarMode()
+        menubarMode: prevMode
       });
-      return restarted || getFloatWindowStatus();
+      return restarted || getFloatWindowStatus(platform);
+    }
+    if (action === 'refresh-session' && (prevVisible || (platform === 'darwin' && prevMenubar))) {
+      const restarted = await spawnFn({
+        pinned: prevPinned,
+        menubarEnabled: platform === 'darwin' ? prevMenubar : false,
+        hiddenWindow: !prevVisible,
+        menubarMode: prevMode
+      });
+      return restarted || getFloatWindowStatus(platform);
     }
   }
 
   if (action === 'quit') {
     if (current?.pid) {
-      await terminateProcessAndWait(current.pid);
+      await terminateFn(current.pid);
     }
     return {
-      ...getFloatWindowStatus(),
+      ...getFloatWindowStatus(platform),
       closed: true,
       message: '已彻底退出悬浮看板与顶部菜单栏守护进程'
     };
@@ -308,34 +387,34 @@ export async function controlFloatWindow(options = {}) {
 
   if (action === 'refresh-session') {
     if (current?.menubarEnabled) {
-      return sendDaemonCommand(current, { cmd: 'refreshSession' });
+      return sendCmdFn(current, { cmd: 'refreshSession' });
     }
-    return getFloatWindowStatus();
+    return getFloatWindowStatus(platform);
   }
 
   if (action === 'ensure-menubar') {
-    if (process.platform !== 'darwin' || !getMenubarPreference()) {
-      return getFloatWindowStatus();
+    if (platform !== 'darwin' || !getMenubarPreference()) {
+      return getFloatWindowStatus(platform);
     }
     if (current) {
       if (!current.menubarEnabled) {
-        return sendDaemonCommand(current, { cmd: 'setMenubar', enabled: true, mode: getMenubarMode() });
+        return sendCmdFn(current, { cmd: 'setMenubar', enabled: true, mode: getMenubarMode() });
       }
-      return getFloatWindowStatus();
+      return getFloatWindowStatus(platform);
     }
-    const st = await spawnDaemon({
-      pinned: true,
+    const st = await spawnFn({
+      pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
       menubarEnabled: true,
       hiddenWindow: true,
-      menubarMode: getMenubarMode()
+      menubarMode: upgradedFrom ? upgradedFrom.prevMode : getMenubarMode()
     });
-    return st || getFloatWindowStatus();
+    return st || getFloatWindowStatus(platform);
   }
 
   if (action === 'set-menubar-mode') {
-    if (process.platform !== 'darwin') {
+    if (platform !== 'darwin') {
       return {
-        ...getFloatWindowStatus(),
+        ...getFloatWindowStatus(platform),
         ok: false,
         error: '顶部系统菜单栏常驻图标仅支持 macOS 系统'
       };
@@ -346,20 +425,29 @@ export async function controlFloatWindow(options = {}) {
     }
     let nextStatus;
     if (current) {
-      nextStatus = await sendDaemonCommand(current, {
+      nextStatus = await sendCmdFn(current, {
         cmd: 'setMenubarMode',
         mode: validMode,
         enableMenubar: true
       });
     } else {
-      nextStatus = await spawnDaemon({
-        pinned: true,
+      nextStatus = await spawnFn({
+        pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
         menubarEnabled: true,
         hiddenWindow: true,
         menubarMode: validMode
       });
     }
-    const fresh = getFloatWindowStatus();
+    const fresh = getFloatWindowStatus(platform);
+    if (!fresh.daemonRunning) {
+      return {
+        ...fresh,
+        ok: false,
+        menubarEnabled: true,
+        menubarMode: validMode,
+        error: diagnoseMacMenubarFailure()
+      };
+    }
     return {
       ...(nextStatus || fresh),
       ...fresh,
@@ -371,9 +459,9 @@ export async function controlFloatWindow(options = {}) {
   }
 
   if (action === 'set-menubar') {
-    if (process.platform !== 'darwin') {
+    if (platform !== 'darwin') {
       return {
-        ...getFloatWindowStatus(),
+        ...getFloatWindowStatus(platform),
         ok: false,
         error: '顶部系统菜单栏常驻图标仅支持 macOS 系统（当前平台可使用 📌 独立悬浮小窗）'
       };
@@ -387,19 +475,28 @@ export async function controlFloatWindow(options = {}) {
 
     let nextStatus;
     if (current) {
-      nextStatus = await sendDaemonCommand(current, { cmd: 'setMenubar', enabled: wantEnabled, mode: curMode });
+      nextStatus = await sendCmdFn(current, { cmd: 'setMenubar', enabled: wantEnabled, mode: curMode });
     } else if (wantEnabled) {
-      nextStatus = await spawnDaemon({
-        pinned: true,
+      nextStatus = await spawnFn({
+        pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
         menubarEnabled: true,
         hiddenWindow: true,
         menubarMode: curMode
       });
     } else {
-      nextStatus = getFloatWindowStatus();
+      nextStatus = getFloatWindowStatus(platform);
     }
 
-    const fresh = getFloatWindowStatus();
+    const fresh = getFloatWindowStatus(platform);
+    if (wantEnabled && !fresh.daemonRunning) {
+      return {
+        ...fresh,
+        ok: false,
+        menubarEnabled: wantEnabled,
+        menubarMode: curMode,
+        error: diagnoseMacMenubarFailure()
+      };
+    }
     return {
       ...(nextStatus || fresh),
       ...fresh,
@@ -418,22 +515,22 @@ export async function controlFloatWindow(options = {}) {
   if (shouldClose) {
     if (!current) {
       return {
-        ...getFloatWindowStatus(),
+        ...getFloatWindowStatus(platform),
         closed: true,
         message: '右侧独立看板当前已处于关闭状态'
       };
     }
     if (current.menubarEnabled && current.mode === 'native-macos') {
-      const st = await sendDaemonCommand(current, { cmd: 'hideWindow' });
+      const st = await sendCmdFn(current, { cmd: 'hideWindow' });
       return {
         ...st,
         closed: true,
         message: '已收回右侧小窗（顶部菜单栏 ◈ 图标仍常驻，单击可随时秒开）'
       };
     }
-    await terminateProcessAndWait(current.pid);
+    await terminateFn(current.pid);
     return {
-      ...getFloatWindowStatus(),
+      ...getFloatWindowStatus(platform),
       closed: true,
       message: '已关闭右侧独立置顶看板'
     };
@@ -445,7 +542,7 @@ export async function controlFloatWindow(options = {}) {
     if (typeof options.pinned === 'boolean') {
       cmdPayload.pinned = options.pinned;
     }
-    const st = await sendDaemonCommand(current, cmdPayload);
+    const st = await sendCmdFn(current, cmdPayload);
     return {
       ...st,
       alreadyRunning: curVisible,
@@ -455,12 +552,14 @@ export async function controlFloatWindow(options = {}) {
     };
   }
 
-  const wantMenubar = process.platform === 'darwin' ? getMenubarPreference() : false;
-  const st = await spawnDaemon({
-    pinned: options.pinned !== false,
+  const wantMenubar = platform === 'darwin' ? getMenubarPreference() : false;
+  const st = await spawnFn({
+    pinned: typeof options.pinned === 'boolean'
+      ? options.pinned
+      : (upgradedFrom ? upgradedFrom.prevPinned : true),
     menubarEnabled: wantMenubar,
     hiddenWindow: false,
-    menubarMode: getMenubarMode()
+    menubarMode: upgradedFrom ? upgradedFrom.prevMode : getMenubarMode()
   });
 
   if (st) {
@@ -488,10 +587,8 @@ function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, i
   const css = readFileSync(join(__dirname, 'styles.css'), 'utf-8').replace(/<\/style/gi, '<\\/style');
   const js = readFileSync(join(__dirname, 'app.js'), 'utf-8').replace(/<\/script/gi, '<\\/script');
 
-  // Remove external preload & Google Fonts links so WKWebView runs 100% offline in-memory
+  // Remove host preload script tag so WKWebView runs 100% offline in-memory
   html = html.replace(/<script\s+src="\/preload\.js"><\/script>/i, '');
-  html = html.replace(/<link[^>]+fonts\.googleapis\.com[^>]*>/gi, '');
-  html = html.replace(/<link[^>]+fonts\.gstatic\.com[^>]*>/gi, '');
   html = html.replace(
     /<link\s+rel="stylesheet"\s+href="\/styles\.css[^"]*">/i,
     () => `<style id="cv-inline-styles">\n${css}\n</style>`
@@ -678,15 +775,18 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
   const cx = snap?.context;
   const spd = snap?.speed;
   const hasConv = Boolean(snap?.ok && snap.conversationId);
+  const isKnownNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
   let title = mode === 'speed' ? '⚡ --t/s' : mode === 'quota' ? '⏳ 额度 --%' : '◈ --%';
 
   if (mode === 'context') {
     if (hasConv && cx) {
-      if (cx.percent !== null && cx.percent !== undefined) {
-        const pct = Math.max(0, Math.min(999, Math.round(Number(cx.percent || 0))));
+      if (isKnownNum(cx.percent)) {
+        const pct = Math.max(0, Math.min(999, Math.round(cx.percent)));
         const prefix = pct >= 90 ? '⚠ ' : '◈ ';
         title = `${prefix}${pct}%`;
+      } else if (isKnownNum(cx.used) && cx.used > 0) {
+        title = `◈ ${fmtCompactTok(cx.used)}`;
       } else {
         title = '◈ 0%';
       }
@@ -705,16 +805,26 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
     }
   } else if (mode === 'quota') {
     const q = cx?.quota || (Array.isArray(snap?.quotas) && snap.quotas.length ? snap.quotas[0] : null);
-    if (q && q.weekly && typeof q.weekly.remainingPercent === 'number' && typeof q.remainingPercent === 'number') {
-      const p5 = Math.max(0, Math.min(100, Math.round(q.remainingPercent)));
-      const pW = Math.max(0, Math.min(100, Math.round(q.weekly.remainingPercent)));
-      const icon = Math.min(p5, pW) <= 15 ? '⚠ ' : '⏳ ';
-      title = `${icon}5h ${p5}%·周${pW}%`;
-    } else if (q && typeof q.remainingPercent === 'number') {
-      const remPct = Math.max(0, Math.min(100, Math.round(q.remainingPercent)));
-      const { winTag, countdown } = fmtQuotaWindowAndCountdown(q.resetTime);
+    const p5 = isKnownNum(q?.fiveHour?.remainingPercent)
+      ? q.fiveHour.remainingPercent
+      : (!q?.fiveHour && isKnownNum(q?.remainingPercent) ? q.remainingPercent : null);
+    const pW = isKnownNum(q?.weekly?.remainingPercent) ? q.weekly.remainingPercent : null;
+    if (p5 !== null && pW !== null) {
+      const r5 = Math.max(0, Math.min(100, Math.round(p5)));
+      const rW = Math.max(0, Math.min(100, Math.round(pW)));
+      const icon = Math.min(r5, rW) <= 15 ? '⚠ ' : '⏳ ';
+      title = `${icon}5h ${r5}%·周${rW}%`;
+    } else if (p5 !== null) {
+      const remPct = Math.max(0, Math.min(100, Math.round(p5)));
+      const { winTag, countdown } = fmtQuotaWindowAndCountdown(q.fiveHour?.resetTime || q.resetTime);
+      const tag = q.fiveHour ? '5h' : winTag;
       const icon = remPct <= 15 ? '⚠ ' : '⏳ ';
-      title = countdown ? `${icon}${winTag} ${remPct}%·${countdown}` : `${icon}${winTag} ${remPct}%`;
+      title = countdown ? `${icon}${tag} ${remPct}%·${countdown}` : `${icon}${tag} ${remPct}%`;
+    } else if (pW !== null) {
+      const remPct = Math.max(0, Math.min(100, Math.round(pW)));
+      const { countdown } = fmtQuotaWindowAndCountdown(q.weekly?.resetTime);
+      const icon = remPct <= 15 ? '⚠ ' : '⏳ ';
+      title = countdown ? `${icon}Week ${remPct}%·${countdown}` : `${icon}Week ${remPct}%`;
     }
   }
 
@@ -727,10 +837,12 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
     sections.push([`会话：${convShort}`, `模型：${modelShort}`].join('\n'));
 
     const metricLines = [];
-    if (cx && cx.percent !== null && cx.percent !== undefined) {
-      const limNum = Number(cx.budget || 256000);
+    if (cx && isKnownNum(cx.percent) && Number(cx.budget) > 0) {
+      const limNum = Number(cx.budget);
       const limStr = limNum >= 1_000_000 ? `${(limNum / 1_000_000).toFixed(0)}M` : `${Math.round(limNum / 1_000)}K`;
-      metricLines.push(`上下文：${Math.round(Number(cx.percent))}%（${fmtCompactTok(cx.used)} / ${limStr}）`);
+      metricLines.push(`上下文：${Math.round(cx.percent)}%（${fmtCompactTok(cx.used)} / ${limStr}）`);
+    } else if (cx && isKnownNum(cx.used)) {
+      metricLines.push(`上下文：已用 ${fmtCompactTok(cx.used)}（上限未知）`);
     } else {
       metricLines.push('上下文：0%（新会话待首轮请求）');
     }
@@ -748,26 +860,47 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
   }
 
   const quotaLines = [];
+  const qs = snap?.quotaStatus;
+  if (qs?.stale) {
+    quotaLines.push('同步：语言服务离线（展示缓存）');
+  } else if (qs?.summaryStale) {
+    quotaLines.push('同步：多窗口配额摘要暂不可用');
+  } else if (qs?.state === 'error') {
+    quotaLines.push('同步：语言服务请求失败');
+  }
+
+  const formatPoolLine = (poolName, obj) => {
+    const p5 = isKnownNum(obj?.fiveHour?.remainingPercent)
+      ? obj.fiveHour.remainingPercent
+      : (!obj?.fiveHour && isKnownNum(obj?.remainingPercent) ? obj.remainingPercent : null);
+    const pW = isKnownNum(obj?.weekly?.remainingPercent) ? obj.weekly.remainingPercent : null;
+    if (p5 !== null && pW !== null) {
+      return `${poolName}：5h ${p5}% · 周 ${pW}%`;
+    }
+    if (p5 !== null) {
+      const { winTag, countdown } = fmtQuotaWindowAndCountdown(obj.fiveHour?.resetTime || obj.resetTime);
+      const tag = obj.fiveHour ? '5h' : winTag;
+      const rst = countdown ? ` · ${countdown} 重置` : '';
+      return `${poolName} (${tag})：${p5}%${rst}`;
+    }
+    if (pW !== null) {
+      const { countdown } = fmtQuotaWindowAndCountdown(obj.weekly?.resetTime);
+      const rst = countdown ? ` · ${countdown} 重置` : '';
+      return `${poolName} (Week)：${pW}%${rst}`;
+    }
+    const { countdown } = fmtQuotaWindowAndCountdown(obj?.fiveHour?.resetTime || obj?.weekly?.resetTime || obj?.resetTime);
+    const rst = countdown ? ` · ${countdown} 重置` : '';
+    return `${poolName}：余量未知${rst}`;
+  };
+
   const pools = Array.isArray(snap?.quotas) ? snap.quotas : [];
   if (pools.length) {
     for (const pool of pools.slice(0, 3)) {
-      const poolName = summarizePoolShortLabel(pool);
-      if (pool.fiveHour && pool.weekly) {
-        quotaLines.push(`${poolName}：5h ${pool.fiveHour.remainingPercent}% · 周 ${pool.weekly.remainingPercent}%`);
-      } else if (typeof pool.remainingPercent === 'number') {
-        const { winTag, countdown } = fmtQuotaWindowAndCountdown(pool.resetTime);
-        const rst = countdown ? ` · ${countdown} 重置` : '';
-        quotaLines.push(`${poolName} (${winTag})：${pool.remainingPercent}%${rst}`);
-      }
+      quotaLines.push(formatPoolLine(summarizePoolShortLabel(pool), pool));
     }
-  } else if (cx?.quota && typeof cx.quota.remainingPercent === 'number') {
+  } else if (cx?.quota) {
     const qName = truncateDisplayCols(cx.quota.label || '当前配额', 14);
-    if (cx.quota.weekly && typeof cx.quota.weekly.remainingPercent === 'number') {
-      quotaLines.push(`${qName}：5h ${cx.quota.remainingPercent}% · 周 ${cx.quota.weekly.remainingPercent}%`);
-    } else {
-      const { winTag, countdown } = fmtQuotaWindowAndCountdown(cx.quota.resetTime);
-      quotaLines.push(`${qName} (${winTag})：${cx.quota.remainingPercent}%${countdown ? ` · ${countdown} 重置` : ''}`);
-    }
+    quotaLines.push(formatPoolLine(qName, cx.quota));
   }
   if (quotaLines.length) {
     sections.push(quotaLines.join('\n'));
@@ -894,10 +1027,13 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     return getSidebarEntryStatus();
   }
 
-  throw new Error(`Unknown route: ${method} ${u.pathname}`);
+  const notFoundErr = new Error(`Unknown route: ${method} ${u.pathname}`);
+  notFoundErr.status = 404;
+  throw notFoundErr;
 }
 
 function ensureCompiledMacBinary() {
+  const errPath = join(getPluginStateDir(), 'last_swiftc_error.txt');
   if (process.platform !== 'darwin' || !existsSync('/usr/bin/swiftc')) {
     return null;
   }
@@ -910,6 +1046,7 @@ function ensureCompiledMacBinary() {
   const binPath = join(binDir, `cv-float-macos-${srcHash}`);
 
   if (existsSync(binPath)) {
+    try { rmSync(errPath, { force: true }); } catch {}
     return binPath;
   }
 
@@ -918,8 +1055,13 @@ function ensureCompiledMacBinary() {
       stdio: 'pipe',
       timeout: 30000
     });
+    try { rmSync(errPath, { force: true }); } catch {}
     return binPath;
-  } catch {
+  } catch (err) {
+    try {
+      const stderrText = String(err?.stderr || err?.message || '').split('\n').filter(Boolean).slice(0, 2).join(' ').slice(0, 240);
+      writeFileSync(errPath, stderrText || 'swiftc compilation failed', 'utf-8');
+    } catch {}
     return null;
   }
 }
@@ -936,6 +1078,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
   const resolvedMode = MENUBAR_MODES.includes(initialMode) ? initialMode : getMenubarMode();
   const state = {
     daemonVersion: DAEMON_VERSION,
+    daemonBuildId: DAEMON_BUILD_ID,
     daemonRunning: true,
     running: initialVisible,
     windowVisible: initialVisible,
@@ -1320,9 +1463,117 @@ function findChromiumBinary() {
   return null;
 }
 
+export function createFallbackHttpServer(state, { onCloseRequest } = {}) {
+  const sessionToken = createLoopbackSessionToken();
+  const server = createServer(async (req, res) => {
+    try {
+      const activePort = server.address()?.port || 0;
+      const guard = guardLoopbackRequest(req, res, { port: activePort, token: sessionToken });
+      if (!guard.ok) return;
+
+      const lookupMethod = guard.method === 'HEAD' ? 'GET' : guard.method;
+      if (lookupMethod === 'GET' && guard.url.pathname === '/') {
+        const fallbackBridgeScript = [
+          '<script>',
+          'window.__CV_FLOAT_MODE__ = true;',
+          'window.__CV_BROWSER_FALLBACK__ = true;',
+          'window.sidecar = {',
+          '  conversationId: "",',
+          '  fetch: (p, o) => fetch(p, o),',
+          '  getWorkspaceUris: async () => [],',
+          '  onWorkspaceChange: () => () => {},',
+          '  closeFloatWindow: async () => {',
+          '    try {',
+          '      const t = document.querySelector(\'meta[name="cv-csrf-token"]\')?.getAttribute("content") || "";',
+          '      await fetch("/api/float-window", {',
+          '        method: "POST",',
+          '        headers: { "Content-Type": "application/json", ...(t ? { "X-CV-Token": t } : {}) },',
+          '        body: JSON.stringify({ action: "close" })',
+          '      });',
+          '    } catch {}',
+          '    try { window.close(); } catch {}',
+          '  }',
+          '};',
+          '</script>'
+        ].join('');
+        const baseHtml = readFileSync(join(__dirname, 'index.html'), 'utf-8').replace(
+          '<script src="/preload.js"></script>',
+          () => fallbackBridgeScript
+        );
+        const html = injectCsrfMeta(baseHtml, sessionToken);
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+        res.end(guard.method === 'HEAD' ? undefined : html);
+        return;
+      }
+      if (lookupMethod === 'GET' && guard.url.pathname === '/styles.css') {
+        res.writeHead(200, {
+          'Content-Type': 'text/css; charset=utf-8',
+          'Cache-Control': 'no-store',
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+        res.end(guard.method === 'HEAD' ? undefined : readFileSync(join(__dirname, 'styles.css'), 'utf-8'));
+        return;
+      }
+      if (lookupMethod === 'GET' && guard.url.pathname === '/app.js') {
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Cache-Control': 'no-store',
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+        res.end(guard.method === 'HEAD' ? undefined : readFileSync(join(__dirname, 'app.js'), 'utf-8'));
+        return;
+      }
+
+      const postBody = guard.method === 'POST' ? await readLoopbackJsonBody(req) : null;
+      if (guard.url.pathname === '/api/float-window' && guard.method === 'POST') {
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+        res.end(JSON.stringify({ ok: true, running: false }));
+        onCloseRequest?.();
+        return;
+      }
+
+      const out = await dispatchApiRpc(
+        `${guard.url.pathname}${guard.url.search}`,
+        lookupMethod,
+        postBody,
+        state
+      );
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...LOOPBACK_SECURITY_HEADERS
+      });
+      res.end(guard.method === 'HEAD' ? undefined : JSON.stringify(out));
+    } catch (err) {
+      const status = Number.isInteger(err?.status) ? err.status : 500;
+      if (!res.headersSent) {
+        res.writeHead(status, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+      }
+      if (!res.writableEnded) {
+        res.end(JSON.stringify({ ok: false, error: err?.message || 'Internal server error' }));
+      }
+    }
+  });
+
+  return { server, sessionToken };
+}
+
 async function startFallbackAppWindowDaemon() {
   const state = {
     daemonVersion: DAEMON_VERSION,
+    daemonBuildId: DAEMON_BUILD_ID,
     daemonRunning: true,
     running: true,
     windowVisible: true,
@@ -1334,46 +1585,10 @@ async function startFallbackAppWindowDaemon() {
     startedAt: new Date().toISOString()
   };
 
-  const server = createServer(async (req, res) => {
-    const u = new URL(req.url, 'http://127.0.0.1');
-    if (req.method === 'GET' && u.pathname === '/') {
-      const html = readFileSync(join(__dirname, 'index.html'), 'utf-8').replace(
-        '<script src="/preload.js"></script>',
-        '<script>window.__CV_FLOAT_MODE__ = true; window.__CV_BROWSER_FALLBACK__ = true; window.sidecar = { conversationId: "", fetch: (p, o) => fetch(p, o), getWorkspaceUris: async () => [], onWorkspaceChange: () => () => {}, closeFloatWindow: () => window.close() };</script>'
-      );
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(html);
-      return;
+  const { server } = createFallbackHttpServer(state, {
+    onCloseRequest: () => {
+      setTimeout(() => { clearFloatStateIfOwned(); process.exit(0); }, 100);
     }
-    if (req.method === 'GET' && u.pathname === '/styles.css') {
-      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(readFileSync(join(__dirname, 'styles.css'), 'utf-8'));
-      return;
-    }
-    if (req.method === 'GET' && u.pathname === '/app.js') {
-      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(readFileSync(join(__dirname, 'app.js'), 'utf-8'));
-      return;
-    }
-
-    let body = '';
-    req.on('data', (c) => { if (body.length < 1024 * 1024) body += c; });
-    req.on('end', async () => {
-      try {
-        if (u.pathname === '/api/float-window' && req.method === 'POST') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, running: false }));
-          setTimeout(() => { clearFloatStateIfOwned(); process.exit(0); }, 100);
-          return;
-        }
-        const out = await dispatchApiRpc(req.url, req.method, body, state);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(out));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: false, error: err.message }));
-      }
-    });
   });
 
   process.on('SIGTERM', () => { clearFloatStateIfOwned(); process.exit(0); });

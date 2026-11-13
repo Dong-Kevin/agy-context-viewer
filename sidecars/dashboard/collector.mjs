@@ -9,7 +9,7 @@
  * 3. Sidecar's own runtime data directory for user settings persistence.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -64,8 +64,197 @@ const fileAuditCache = new Map();       // "realPath|size|mtimeMs" -> attachment
 const transcriptHistCache = new Map();  // filePath -> { size, mtimeMs, records, firstDate, stepCount }
 const convGenMetaCache = new Map();     // convId -> { at, callsByStep, latestMeta }
 const recentConvMetaCache = new Map();  // logPath -> { key, title, lastContextTokens, turnsCount }
-let cachedHostStatus = { at: 0, raw: null, plan: null, quotas: [], modelConfigs: [], quotaSummaryGroups: [], dynamicModelMap: {} };
-let cachedHistoryResult = { at: 0, etag: '', data: null };
+let cachedHostStatus = {
+  at: 0,
+  lsKey: '',
+  sig: 'init',
+  raw: null,
+  plan: null,
+  quotas: [],
+  modelConfigs: [],
+  quotaSummaryGroups: [],
+  dynamicModelMap: {},
+  quotaStatus: {
+    state: 'unavailable',
+    stale: false,
+    summaryStale: false,
+    source: 'none',
+    lastSuccessAt: null,
+    summaryLastSuccessAt: null,
+    reason: ''
+  }
+};
+let lastGoodHostData = null;
+let cachedHistoryResult = { at: 0, hostSig: '', etag: '', data: null };
+
+export const LOOPBACK_SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Cross-Origin-Resource-Policy': 'same-origin'
+};
+
+export function createLoopbackSessionToken() {
+  return randomBytes(24).toString('hex');
+}
+
+export function injectCsrfMeta(html, token) {
+  if (!token || typeof html !== 'string') return html;
+  const tag = `  <meta name="cv-csrf-token" content="${token}">\n`;
+  if (html.includes('</head>')) {
+    return html.replace('</head>', `${tag}</head>`);
+  }
+  return `${tag}${html}`;
+}
+
+function sendLoopbackJsonError(res, status, message, extraHeaders = {}) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...LOOPBACK_SECURITY_HEADERS,
+    ...extraHeaders
+  });
+  res.end(JSON.stringify({ ok: false, error: message }));
+}
+
+export function guardLoopbackRequest(req, res, { port, token }) {
+  const actualPort = Number(port || 0);
+  const allowedHosts = new Set([
+    `127.0.0.1:${actualPort}`,
+    `localhost:${actualPort}`,
+    `[::1]:${actualPort}`
+  ]);
+  const rawHost = String(req.headers?.host || '').trim().toLowerCase();
+  if (!actualPort || !rawHost || !allowedHosts.has(rawHost)) {
+    sendLoopbackJsonError(res, 403, 'Forbidden host');
+    return { ok: false };
+  }
+
+  const rawUrl = req.url;
+  if (
+    typeof rawUrl !== 'string' ||
+    !rawUrl.startsWith('/') ||
+    rawUrl.startsWith('//') ||
+    rawUrl.startsWith('/\\') ||
+    rawUrl.includes('\\')
+  ) {
+    sendLoopbackJsonError(res, 400, 'Invalid request URL');
+    return { ok: false };
+  }
+
+  const expectedOriginBase = `http://127.0.0.1:${actualPort}`;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl, expectedOriginBase);
+  } catch {
+    sendLoopbackJsonError(res, 400, 'Invalid request URL');
+    return { ok: false };
+  }
+  if (parsedUrl.origin !== expectedOriginBase) {
+    sendLoopbackJsonError(res, 400, 'Invalid request URL');
+    return { ok: false };
+  }
+
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+    sendLoopbackJsonError(res, 405, 'Method not allowed', { Allow: 'GET, POST' });
+    return { ok: false };
+  }
+
+  const allowedOrigins = new Set([
+    `http://127.0.0.1:${actualPort}`,
+    `http://localhost:${actualPort}`,
+    `http://[::1]:${actualPort}`
+  ]);
+  const rawOrigin = req.headers?.origin !== undefined ? String(req.headers.origin).trim().toLowerCase() : '';
+  const secFetchSite = req.headers?.['sec-fetch-site'] ? String(req.headers['sec-fetch-site']).trim().toLowerCase() : '';
+
+  const isSensitiveGet = parsedUrl.pathname === '/preload.js' || parsedUrl.pathname.startsWith('/api/');
+  if (method === 'POST' || isSensitiveGet) {
+    if (rawOrigin && !allowedOrigins.has(rawOrigin)) {
+      sendLoopbackJsonError(res, 403, 'Forbidden origin');
+      return { ok: false };
+    }
+    if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+      sendLoopbackJsonError(res, 403, 'Cross-site request blocked');
+      return { ok: false };
+    }
+  }
+
+  if (method === 'POST') {
+    const contentType = String(req.headers?.['content-type'] || '').trim();
+    if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+      sendLoopbackJsonError(res, 415, 'Content-Type must be application/json');
+      return { ok: false };
+    }
+    const providedToken = String(req.headers?.['x-cv-token'] || '');
+    const expectedBuf = Buffer.from(String(token || ''), 'utf-8');
+    const providedBuf = Buffer.from(providedToken, 'utf-8');
+    if (!expectedBuf.length || providedBuf.length !== expectedBuf.length || !timingSafeEqual(providedBuf, expectedBuf)) {
+      sendLoopbackJsonError(res, 403, 'Invalid or missing session token');
+      return { ok: false };
+    }
+  }
+
+  return { ok: true, url: parsedUrl, method };
+}
+
+export function readLoopbackJsonBody(req, maxBytes = 256 * 1024) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+    const fail = (status, message) => {
+      if (settled) return;
+      settled = true;
+      const err = new Error(message);
+      err.status = status;
+      rejectPromise(err);
+    };
+    req.on('data', (chunk) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      total += buf.length;
+      if (total > maxBytes) {
+        req.resume();
+        fail(413, 'Request payload too large');
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on('error', () => fail(400, 'Failed to read request body'));
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      if (total === 0) {
+        resolvePromise({});
+        return;
+      }
+      const raw = Buffer.concat(chunks).toString('utf-8').trim();
+      if (!raw) {
+        resolvePromise({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          const err = new Error('JSON body must be an object');
+          err.status = 400;
+          rejectPromise(err);
+          return;
+        }
+        resolvePromise(parsed);
+      } catch {
+        const err = new Error('Malformed JSON body');
+        err.status = 400;
+        rejectPromise(err);
+      }
+    });
+  });
+}
+
+function computeContentEtag(prefix, payload) {
+  return `${prefix}:${createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)}`;
+}
 
 export function findAppDataDir() {
   const execDataDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
@@ -215,24 +404,119 @@ function callLanguageServer(method, payload = {}, timeoutMs = 4500) {
   });
 }
 
+function makeQuotaStatus(state, opts = {}) {
+  return {
+    state,
+    stale: Boolean(opts.stale),
+    summaryStale: Boolean(opts.summaryStale),
+    source: opts.source || 'none',
+    lastSuccessAt: opts.lastSuccessAt || null,
+    summaryLastSuccessAt: opts.summaryLastSuccessAt || null,
+    reason: opts.reason || ''
+  };
+}
+
+function toStableQuotaState(quotaStatus = {}) {
+  return {
+    state: quotaStatus.state || 'unavailable',
+    stale: Boolean(quotaStatus.stale),
+    summaryStale: Boolean(quotaStatus.summaryStale),
+    source: quotaStatus.source || 'none'
+  };
+}
+
 async function getHostUserStatus(force = false) {
-  if (!force && cachedHostStatus.at && Date.now() - cachedHostStatus.at < 30_000) {
+  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
+  const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
+  if (!lsAddr || !csrf) {
+    return {
+      at: Date.now(),
+      lsKey: '',
+      sig: 'no-ls',
+      raw: null,
+      plan: parseUserPlanStatus(null),
+      quotas: [],
+      modelConfigs: [],
+      quotaSummaryGroups: [],
+      dynamicModelMap: {},
+      quotaStatus: makeQuotaStatus('unavailable', {
+        source: 'none',
+        reason: '未连接宿主语言服务'
+      })
+    };
+  }
+  const lsKey = `${lsAddr}|${csrf}`;
+  if (!force && cachedHostStatus.at && cachedHostStatus.lsKey === lsKey && Date.now() - cachedHostStatus.at < 30_000) {
     return cachedHostStatus;
   }
   const [res, quotaSummaryRes] = await Promise.all([
     callLanguageServer('GetUserStatus', {}),
     callLanguageServer('RetrieveUserQuotaSummary', {})
   ]);
+  const cachedGood = lastGoodHostData?.lsKey === lsKey ? lastGoodHostData : null;
   if (!res) {
-    return cachedHostStatus.plan
-      ? cachedHostStatus
-      : { at: Date.now(), raw: null, plan: parseUserPlanStatus(null), quotas: [], modelConfigs: [], quotaSummaryGroups: [], dynamicModelMap: {} };
+    if (cachedGood) {
+      const quotaStatus = makeQuotaStatus('stale', {
+        stale: true,
+        summaryStale: true,
+        source: 'cache',
+        lastSuccessAt: cachedGood.fetchedAt,
+        summaryLastSuccessAt: cachedGood.summaryFetchedAt,
+        reason: '语言服务连接失败，当前展示上次成功同步数据'
+      });
+      const { updatedAt: _planUpdatedAt, ...stablePlan } = cachedGood.plan || {};
+      const sig = computeContentEtag('host', {
+        plan: stablePlan,
+        quotas: cachedGood.quotas,
+        dynamicModelMap: cachedGood.dynamicModelMap,
+        quotaState: toStableQuotaState(quotaStatus)
+      });
+      cachedHostStatus = {
+        at: Date.now(),
+        lsKey,
+        sig,
+        raw: null,
+        plan: cachedGood.plan,
+        quotas: cachedGood.quotas,
+        modelConfigs: cachedGood.modelConfigs,
+        quotaSummaryGroups: cachedGood.quotaSummaryGroups,
+        dynamicModelMap: cachedGood.dynamicModelMap,
+        quotaStatus
+      };
+      return cachedHostStatus;
+    }
+    const plan = parseUserPlanStatus(null);
+    const quotaStatus = makeQuotaStatus('error', {
+      stale: false,
+      summaryStale: false,
+      source: 'none',
+      lastSuccessAt: null,
+      summaryLastSuccessAt: null,
+      reason: '语言服务请求失败，暂未获取到配额数据'
+    });
+    const sig = computeContentEtag('host', { quotaState: toStableQuotaState(quotaStatus) });
+    cachedHostStatus = {
+      at: Date.now(),
+      lsKey,
+      sig,
+      raw: null,
+      plan,
+      quotas: [],
+      modelConfigs: [],
+      quotaSummaryGroups: [],
+      dynamicModelMap: {},
+      quotaStatus
+    };
+    return cachedHostStatus;
   }
+
+  const nowIso = new Date().toISOString();
   const plan = parseUserPlanStatus(res);
   const accountHash = hashAccountKey(res?.userStatus?.email || '');
   plan.accountKey = accountHash;
   const modelConfigs = res?.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
-  const quotaSummaryGroups = quotaSummaryRes?.response?.groups || quotaSummaryRes?.groups || [];
+  const summaryOk = quotaSummaryRes !== null && typeof quotaSummaryRes === 'object';
+  const quotaSummaryGroups = summaryOk ? (quotaSummaryRes?.response?.groups || quotaSummaryRes?.groups || []) : [];
   const dynamicModelMap = {};
   for (const cfg of modelConfigs) {
     const mid = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim().toLowerCase();
@@ -240,7 +524,54 @@ async function getHostUserStatus(force = false) {
     if (mid && norm) dynamicModelMap[mid] = norm;
   }
   const quotas = groupModelQuotas(modelConfigs, quotaSummaryGroups);
-  cachedHostStatus = { at: Date.now(), raw: null, plan, quotas, modelConfigs, quotaSummaryGroups, dynamicModelMap };
+  const summaryFetchedAt = summaryOk ? nowIso : (cachedGood?.summaryFetchedAt || null);
+  const quotaStatus = summaryOk
+    ? makeQuotaStatus('live', {
+        stale: false,
+        summaryStale: false,
+        source: 'live',
+        lastSuccessAt: nowIso,
+        summaryLastSuccessAt: nowIso,
+        reason: ''
+      })
+    : makeQuotaStatus('degraded', {
+        stale: false,
+        summaryStale: true,
+        source: 'live',
+        lastSuccessAt: nowIso,
+        summaryLastSuccessAt: summaryFetchedAt,
+        reason: '多窗口配额摘要暂不可用，当前仅展示基础配额信息'
+      });
+  lastGoodHostData = {
+    lsKey,
+    fetchedAt: nowIso,
+    summaryFetchedAt,
+    accountKey: accountHash,
+    plan,
+    quotas,
+    modelConfigs,
+    quotaSummaryGroups,
+    dynamicModelMap
+  };
+  const { updatedAt: _planUpdatedAt, ...stablePlan } = plan;
+  const sig = computeContentEtag('host', {
+    plan: stablePlan,
+    quotas,
+    dynamicModelMap,
+    quotaState: toStableQuotaState(quotaStatus)
+  });
+  cachedHostStatus = {
+    at: Date.now(),
+    lsKey,
+    sig,
+    raw: null,
+    plan,
+    quotas,
+    modelConfigs,
+    quotaSummaryGroups,
+    dynamicModelMap,
+    quotaStatus
+  };
   return cachedHostStatus;
 }
 
@@ -689,12 +1020,62 @@ function extractCleanUserTitle(rawContent) {
   return text.length > 44 ? `${text.slice(0, 44)}…` : text;
 }
 
-function parseModelSettingFromText(text) {
-  if (!text || !text.includes('Model Selection')) return null;
-  const matches = [...text.matchAll(/Model Selection`?\s+from\s+.*?\s+to\s+([^\n.]+?)(?:\.|\n|$)/gi)];
-  if (!matches.length) return null;
-  const picked = matches[matches.length - 1][1].trim();
-  return picked && picked.toLowerCase() !== 'none' ? picked : null;
+export function parseModelSettingFromText(text) {
+  if (!text || typeof text !== 'string' || !/Model Selection/i.test(text)) return null;
+  const re = /Model Selection[`"']?\s+from\s+[^\r\n]+?\s+to\s+([^\r\n<]+?)(?:\.(?=\s|$|<)|[;，。]|\r?\n|<|$)/gi;
+  let lastPicked = null;
+  for (const m of text.matchAll(re)) {
+    const cleaned = m[1].trim().replace(/^[`"']+|[`"']+$/g, '').trim();
+    if (!cleaned) continue;
+    lastPicked = cleaned.toLowerCase() === 'none' ? null : cleaned;
+  }
+  return lastPicked;
+}
+
+function extractStepModel(step, gmEntry = null, fallbackRunningModel = '') {
+  const gmModel = gmEntry?.chatModel?.modelDisplayName
+    || gmEntry?.chatModel?.responseModel
+    || gmEntry?.chatModel?.model
+    || '';
+  const stepModel = step?.chatModel?.modelDisplayName
+    || step?.chatModel?.responseModel
+    || step?.chatModel?.model
+    || step?.modelDisplayName
+    || step?.responseModel
+    || step?.model
+    || step?.modelId
+    || '';
+  return String(gmModel || stepModel || fallbackRunningModel || '').trim();
+}
+
+function extractStepUsage(step) {
+  if (step?.input_tokens != null || step?.output_tokens != null || step?.cache_read_tokens != null) {
+    const input = Number(step.input_tokens || 0);
+    const cache = Number(step.cache_read_tokens || 0);
+    const output = Number(step.output_tokens || 0);
+    const thinking = Number(step.thinking_output_tokens || 0);
+    return { input, cache, output, thinking, response: Math.max(0, output - thinking) };
+  }
+  const u = step?.chatModel?.usage || step?.usage;
+  if (u && typeof u === 'object') {
+    const input = Number(u.inputTokens ?? u.input_tokens ?? 0);
+    const cache = Number(u.cacheReadTokens ?? u.cache_read_tokens ?? 0);
+    const output = Number(u.outputTokens ?? u.output_tokens ?? 0);
+    const thinking = Number(u.thinkingOutputTokens ?? u.thinking_output_tokens ?? 0);
+    const response = Number(u.responseOutputTokens ?? u.response_output_tokens ?? Math.max(0, output - thinking));
+    return { input, cache, output, thinking, response };
+  }
+  return { input: 0, cache: 0, output: 0, thinking: 0, response: 0 };
+}
+
+function isModelTurnStep(step) {
+  const type = String(step?.type || '');
+  if (type === 'USER_INPUT' || type === 'CHECKPOINT' || type === 'ERROR_MESSAGE' || step?.checkpoint) {
+    return false;
+  }
+  if (type === 'PLANNER_RESPONSE') return true;
+  const u = extractStepUsage(step);
+  return (u.input + u.cache + u.output) > 0;
 }
 
 const annotationFileCache = new Map();
@@ -792,8 +1173,9 @@ export function listRecentConversations(limit = 24) {
                 title = extractCleanUserTitle(obj.content);
               }
             }
-            if (obj.type === 'PLANNER_RESPONSE') {
-              const tot = Number(obj.input_tokens || 0) + Number(obj.cache_read_tokens || 0) + Number(obj.output_tokens || 0);
+            if (isModelTurnStep(obj)) {
+              const u = extractStepUsage(obj);
+              const tot = u.input + u.cache + u.output;
               if (tot > 0) {
                 turnsCount++;
                 lastContextTokens = tot;
@@ -1008,7 +1390,9 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     } catch {}
   }
 
-  const snapCacheKey = `${convId}|${logStatMtime}|${logStatSize}|${Math.floor(Date.now() / 15000)}`;
+  const host = await getHostUserStatus(force);
+
+  const snapCacheKey = `${convId}|${logStatMtime}|${logStatSize}|${host.sig}|${Math.floor(Date.now() / 15000)}`;
   if (!force && scanSnapCache.has(convId)) {
     const hit = scanSnapCache.get(convId);
     if (hit.key === snapCacheKey) {
@@ -1018,8 +1402,6 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       };
     }
   }
-
-  const host = await getHostUserStatus(force);
 
   const genMetaBundle = await fetchGeneratorMetadataForConv(convId, force);
 
@@ -1039,6 +1421,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
   let toolCallsCount = 0;
   let totalSteps = 0;
   let activeSettingModel = '';
+  let lastSettingStepIdx = -1;
   let latestStepError = null;
   let conversationTitle = '';
   let logMtimeMs = 0;
@@ -1083,9 +1466,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         conversationTitle = extractCleanUserTitle(contentStr);
       }
       const switchedModel = parseModelSettingFromText(contentStr);
-      if (switchedModel) activeSettingModel = switchedModel;
+      if (switchedModel) {
+        activeSettingModel = switchedModel;
+        lastSettingStepIdx = sIdx;
+      }
       addMeasure(groups.user, measureText(contentStr));
-    } else if (type === 'PLANNER_RESPONSE') {
+    } else if (isModelTurnStep(step)) {
       assistantMessages++;
       addMeasure(groups.assistant, measureText(contentStr));
       if (step.thinking) addMeasure(groups.thinking, measureText(step.thinking));
@@ -1097,9 +1483,12 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       stepMetaMap.set(sIdx, {
         arrayIdx: i,
         createdAt: step.created_at || '',
-        tools: toolBadges
+        tools: toolBadges,
+        stepModel: extractStepModel(step, null, ''),
+        runningSettingModel: activeSettingModel
       });
-      if ((step.input_tokens || step.cache_read_tokens || step.output_tokens) && step.status !== 'ERROR') {
+      const stepUsage = extractStepUsage(step);
+      if ((stepUsage.input || stepUsage.cache || stepUsage.output) && step.status !== 'ERROR') {
         lastTranscriptPlannerArrayIdx = i;
       }
       if (step.status === 'ERROR' && contentStr) {
@@ -1153,9 +1542,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       const thinking = Number(usage.thinkingOutputTokens || 0);
       const responseTokens = Number(usage.responseOutputTokens ?? Math.max(0, output - thinking));
       const total = input + cache + output;
-      const rawModel = cm.modelDisplayName || cm.responseModel || cm.model || activeSettingModel || '';
+      const stepIdx = gm.stepIndices?.[0] ?? null;
+      const sMeta = stepIdx !== null ? stepMetaMap.get(Number(stepIdx)) : null;
+      const rawModel = extractStepModel(null, gm, sMeta?.stepModel || sMeta?.runningSettingModel || activeSettingModel);
       const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
-      const displayModel = formatModelDisplayName(rawModel, modelKey);
+      const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
 
       const ttft = parseDurationSec(cm.timeToFirstToken);
       const streamingSec = parseDurationSec(cm.streamingDuration);
@@ -1167,15 +1558,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         : null;
 
       const costInfo = calculateRequestApiCost(
-        { model: rawModel, modelKey, inputTokens: input, cacheTokens: cache, outputTokens: output, thinkingTokens: thinking },
+        {
+          model: rawModel,
+          modelKey,
+          inputTokens: input,
+          cacheTokens: cache,
+          outputTokens: output,
+          thinkingTokens: thinking,
+          date: sMeta?.createdAt
+        },
         host.dynamicModelMap
       );
       if (costInfo.isPriced && costInfo.costUSD) {
         sessionCostUSD += costInfo.costUSD;
       }
 
-      const stepIdx = gm.stepIndices?.[0] ?? null;
-      const sMeta = stepIdx !== null ? stepMetaMap.get(Number(stepIdx)) : null;
       const deltaTokens = total > 0 ? (prevTotal > 0 ? total - prevTotal : total) : 0;
       if (total > 0) prevTotal = total;
       const promptSum = input + cache;
@@ -1185,9 +1582,11 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       turns.push({
         turnIndex: idx + 1,
         stepIndex: stepIdx,
+        _arrayIdx: sMeta?.arrayIdx ?? -1,
         createdAt: sMeta?.createdAt || '',
         tools: sMeta?.tools || [],
-        model: displayModel,
+        model: displayModel || '未记录模型',
+        hasRecordedModel: Boolean(rawModel),
         modelKey,
         inputTokens: input,
         cacheTokens: cache,
@@ -1197,7 +1596,7 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         totalTokens: total,
         deltaTokens,
         cacheHitPercent: turnCachePct,
-        budget: Number(ctxMeta?.maxContextTokens || 0) || 256000,
+        budget: Number(ctxMeta?.maxContextTokens || 0) || null,
         estimate: Number(ctxMeta?.estimatedTokensUsed || 0) || null,
         ttft: ttft !== null ? Number(ttft.toFixed(2)) : null,
         streamingSec: streamingSec !== null ? Number(streamingSec.toFixed(2)) : null,
@@ -1220,10 +1619,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         const m = parseModelSettingFromText(s.content);
         if (m) runningModel = m;
       }
-      if (s.type === 'PLANNER_RESPONSE') {
-        const input = Number(s.input_tokens || 0);
-        const cache = Number(s.cache_read_tokens || 0);
-        const output = Number(s.output_tokens || 0);
+      if (isModelTurnStep(s)) {
+        const { input, cache, output, thinking, response: responseTokens } = extractStepUsage(s);
         const total = input + cache + output;
         if (total <= 0) continue;
 
@@ -1238,10 +1635,19 @@ export async function scanConversation(requestedConvId = '', options = {}) {
           duration = Number(((endMs - startMs) / 1000).toFixed(2));
         }
         const tps = output > 0 && duration && duration > 0.1 ? Number((output / duration).toFixed(1)) : null;
-        const modelKey = normalizeModelId(runningModel, host.dynamicModelMap);
-        const displayModel = formatModelDisplayName(runningModel, modelKey);
+        const rawModel = extractStepModel(s, null, runningModel);
+        const modelKey = normalizeModelId(rawModel, host.dynamicModelMap);
+        const displayModel = rawModel ? formatModelDisplayName(rawModel, modelKey) : '';
         const costInfo = calculateRequestApiCost(
-          { model: runningModel, modelKey, inputTokens: input, cacheTokens: cache, outputTokens: output, date: s.created_at },
+          {
+            model: rawModel,
+            modelKey,
+            inputTokens: input,
+            cacheTokens: cache,
+            outputTokens: output,
+            thinkingTokens: thinking,
+            date: s.created_at
+          },
           host.dynamicModelMap
         );
         if (costInfo.isPriced && costInfo.costUSD) {
@@ -1257,19 +1663,21 @@ export async function scanConversation(requestedConvId = '', options = {}) {
         turns.push({
           turnIndex: turns.length + 1,
           stepIndex: sIdx,
+          _arrayIdx: i,
           createdAt: s.created_at || '',
           tools: sMeta?.tools || [],
-          model: displayModel,
+          model: displayModel || '未记录模型',
+          hasRecordedModel: Boolean(rawModel),
           modelKey,
           inputTokens: input,
           cacheTokens: cache,
           outputTokens: output,
-          thinkingTokens: 0,
-          responseTokens: output,
+          thinkingTokens: thinking,
+          responseTokens,
           totalTokens: total,
           deltaTokens,
           cacheHitPercent: turnCachePct,
-          budget: 256000,
+          budget: null,
           estimate: null,
           ttft: null,
           streamingSec: null,
@@ -1285,26 +1693,8 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     }
   }
 
-  // Compute pending unsent tokens appended after the last completed model turn
-  let lastCoveredArrayIdx = lastTranscriptPlannerArrayIdx;
   const latestTurn = turns.length ? turns[turns.length - 1] : null;
-  if (latestTurn?.stepIndex != null && stepMetaMap.has(Number(latestTurn.stepIndex))) {
-    lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, stepMetaMap.get(Number(latestTurn.stepIndex)).arrayIdx);
-  }
-  const pendingMeasure = emptyMeasure();
-  let pendingStepsCount = 0;
-  if (lastCoveredArrayIdx >= 0 && lastCoveredArrayIdx < rawSteps.length - 1) {
-    for (let i = lastCoveredArrayIdx + 1; i < rawSteps.length; i++) {
-      const stp = rawSteps[i];
-      if (typeof stp.content === 'string' && stp.content) {
-        addMeasure(pendingMeasure, measureText(stp.content));
-        pendingStepsCount++;
-      }
-    }
-  }
-  const pendingTokens = pendingStepsCount > 0
-    ? Math.round((pendingMeasure.low + pendingMeasure.high) / 2)
-    : 0;
+  const latestValidTurn = [...turns].reverse().find((t) => t.totalTokens > 0 && !t.error) || latestTurn;
 
   // Session cumulative throughput & session-wide TPS stats
   const sessionTotals = {
@@ -1337,8 +1727,6 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     ? Number(Math.max(...validTpsValues).toFixed(1))
     : null;
 
-  const latestValidTurn = [...turns].reverse().find((t) => t.totalTokens > 0 && !t.error) || latestTurn;
-
   // Populate system & tool definition token estimates from server contextBreakdown if present
   const contextBreakdown = latestTurn?.contextBreakdown || null;
   if (contextBreakdown?.groups?.length) {
@@ -1370,19 +1758,59 @@ export async function scanConversation(requestedConvId = '', options = {}) {
       ? latestStepError.text
       : ''
   );
-  const currentModelDisplay = latestTurn?.model || formatModelDisplayName(activeSettingModel);
+  const switchedAfterLatestTurn = Boolean(
+    activeSettingModel &&
+    lastSettingStepIdx >= 0 &&
+    (latestTurn?.stepIndex == null || lastSettingStepIdx > Number(latestTurn.stepIndex))
+  );
+  const currentModelKey = switchedAfterLatestTurn
+    ? (normalizeModelId(activeSettingModel, host.dynamicModelMap) || null)
+    : (latestTurn?.modelKey || normalizeModelId(activeSettingModel, host.dynamicModelMap) || null);
+  const currentModelDisplay = switchedAfterLatestTurn
+    ? formatModelDisplayName(activeSettingModel, currentModelKey)
+    : (latestTurn?.hasRecordedModel
+        ? latestTurn.model
+        : (activeSettingModel ? formatModelDisplayName(activeSettingModel, currentModelKey) : '未记录模型'));
   const errorInfo = classifyRequestError(activeErrorText, {
     currentModel: currentModelDisplay,
-    clientModelConfigs: host.modelConfigs
+    clientModelConfigs: host.modelConfigs,
+    quotaSummaryGroups: host.quotaSummaryGroups
   });
+
+  // Compute pending unsent tokens appended after the last completed model turn
+  let lastCoveredArrayIdx = lastTranscriptPlannerArrayIdx;
+  if (latestValidTurn && latestValidTurn.totalTokens > 0 && !latestValidTurn.error) {
+    lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestValidTurn._arrayIdx ?? -1);
+  }
+  if (errorInfo.kind === 'context_overflow' && latestTurn?.estimate > 0) {
+    lastCoveredArrayIdx = Math.max(lastCoveredArrayIdx, latestTurn._arrayIdx ?? -1);
+  }
+  const pendingMeasure = emptyMeasure();
+  let pendingStepsCount = 0;
+  if (lastCoveredArrayIdx >= 0 && lastCoveredArrayIdx < rawSteps.length - 1) {
+    for (let i = lastCoveredArrayIdx + 1; i < rawSteps.length; i++) {
+      const stp = rawSteps[i];
+      if (stp.type === 'ERROR_MESSAGE' || stp.status === 'ERROR') continue;
+      if (typeof stp.content === 'string' && stp.content) {
+        addMeasure(pendingMeasure, measureText(stp.content));
+        pendingStepsCount++;
+      }
+    }
+  }
+  const pendingTokens = pendingStepsCount > 0
+    ? Math.round((pendingMeasure.low + pendingMeasure.high) / 2)
+    : 0;
 
   const baseUsedTokens = errorInfo.kind === 'context_overflow'
     ? (latestTurn?.estimate || latestValidTurn?.totalTokens || null)
     : (latestValidTurn?.totalTokens ?? latestTurn?.estimate ?? null);
   const usedTokens = baseUsedTokens !== null ? baseUsedTokens + pendingTokens : null;
-  const budgetTokens = latestTurn?.budget || latestValidTurn?.budget || 256000;
-  const remainingTokens = usedTokens !== null && budgetTokens > 0 ? Math.max(0, budgetTokens - usedTokens) : null;
-  const usedPercent = usedTokens !== null && budgetTokens > 0
+  const budgetTokens = latestTurn?.budget || latestValidTurn?.budget || null;
+  const budgetSource = budgetTokens ? 'server' : 'unknown';
+  const remainingTokens = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
+    ? Math.max(0, budgetTokens - usedTokens)
+    : null;
+  const usedPercent = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
     ? Number(((usedTokens / budgetTokens) * 100).toFixed(1))
     : null;
   const promptTotal = (latestValidTurn?.inputTokens || 0) + (latestValidTurn?.cacheTokens || 0);
@@ -1411,78 +1839,98 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     convWorkspaceCache.set(convId, workspacePath);
   }
 
-  const etag = `${convId}|${logMtimeMs}|${totalSteps}|${turns.length}|${usedTokens ?? 'na'}|${activeErrorText.length}`;
+  const resolvedTitle = conversationTitle || `会话 ${convId.slice(0, 8)}`;
+  const contextPayload = {
+    model: currentModelDisplay,
+    modelKey: currentModelKey,
+    used: usedTokens,
+    baseUsed: baseUsedTokens,
+    pendingTokens,
+    pendingStepsCount,
+    actual: latestValidTurn?.totalTokens ?? null,
+    estimate: latestTurn?.estimate ?? null,
+    budget: budgetTokens,
+    budgetSource,
+    remaining: remainingTokens,
+    percent: usedPercent,
+    inputTokens: latestValidTurn?.inputTokens ?? null,
+    cacheTokens: latestValidTurn?.cacheTokens ?? null,
+    outputTokens: latestValidTurn?.outputTokens ?? null,
+    thinkingTokens: latestValidTurn?.thinkingTokens ?? 0,
+    responseTokens: latestValidTurn?.responseTokens ?? (latestValidTurn?.outputTokens ?? 0),
+    cacheHitPercent,
+    roundCostUSD: Number((latestValidTurn?.costUSD || 0).toFixed(5)),
+    sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
+    isPriced: Boolean(latestValidTurn?.isPriced),
+    error: errorInfo,
+    quota: modelQuota,
+    breakdown: contextBreakdown,
+    sessionTotals
+  };
+  const speedPayload = latestValidTurn ? {
+    tps: latestValidTurn.tps,
+    streamingTps: latestValidTurn.streamingTps,
+    avgTps,
+    peakTps,
+    duration: latestValidTurn.duration,
+    ttft: latestValidTurn.ttft,
+    streamingSec: latestValidTurn.streamingSec,
+    outputTokens: latestValidTurn.outputTokens,
+    thinkingTokens: latestValidTurn.thinkingTokens,
+    responseTokens: latestValidTurn.responseTokens,
+    isServerExact: Boolean(genMetaBundle?.generatorList?.length)
+  } : null;
+  const sparklinePayload = turns.slice(-24).map((t) => ({
+    turn: t.turnIndex,
+    total: t.totalTokens,
+    delta: t.deltaTokens,
+    cache: t.cacheTokens,
+    output: t.outputTokens,
+    tps: t.tps,
+    costUSD: t.costUSD
+  }));
+  const turnsPayload = turns.slice(-40).reverse().map(({ contextBreakdown: _cb, hasRecordedModel: _hrm, _arrayIdx: _ai, ...rest }) => rest);
+  const auditPayload = {
+    totalSteps,
+    turnsCount: turns.length,
+    userMessages,
+    assistantMessages,
+    toolCallsCount,
+    groups,
+    attachmentTotal,
+    localTotal,
+    attachments,
+    unknownAttachmentsCount
+  };
+
+  const etag = computeContentEtag('ctx', {
+    conversationId: convId,
+    conversationTitle: resolvedTitle,
+    workspacePath,
+    quotas: host.quotas || [],
+    quotaState: toStableQuotaState(host.quotaStatus),
+    context: contextPayload,
+    speed: speedPayload,
+    sparkline: sparklinePayload,
+    turns: turnsPayload,
+    audit: auditPayload
+  });
 
   const resultSnap = {
     ok: true,
     etag,
     scannedAt: Date.now(),
     conversationId: convId,
-    conversationTitle: conversationTitle || `会话 ${convId.slice(0, 8)}`,
+    conversationTitle: resolvedTitle,
     workspacePath,
     recentConversations,
     quotas: host.quotas || [],
-    context: {
-      model: currentModelDisplay,
-      modelKey: latestTurn?.modelKey || normalizeModelId(activeSettingModel, host.dynamicModelMap),
-      used: usedTokens,
-      baseUsed: baseUsedTokens,
-      pendingTokens,
-      pendingStepsCount,
-      actual: latestValidTurn?.totalTokens ?? null,
-      estimate: latestTurn?.estimate ?? null,
-      budget: budgetTokens,
-      remaining: remainingTokens,
-      percent: usedPercent,
-      inputTokens: latestValidTurn?.inputTokens ?? null,
-      cacheTokens: latestValidTurn?.cacheTokens ?? null,
-      outputTokens: latestValidTurn?.outputTokens ?? null,
-      thinkingTokens: latestValidTurn?.thinkingTokens ?? 0,
-      responseTokens: latestValidTurn?.responseTokens ?? (latestValidTurn?.outputTokens ?? 0),
-      cacheHitPercent,
-      roundCostUSD: Number((latestValidTurn?.costUSD || 0).toFixed(5)),
-      sessionCostUSD: Number(sessionCostUSD.toFixed(4)),
-      isPriced: Boolean(latestValidTurn?.isPriced),
-      error: errorInfo,
-      quota: modelQuota,
-      breakdown: contextBreakdown,
-      sessionTotals
-    },
-    speed: latestValidTurn ? {
-      tps: latestValidTurn.tps,
-      streamingTps: latestValidTurn.streamingTps,
-      avgTps,
-      peakTps,
-      duration: latestValidTurn.duration,
-      ttft: latestValidTurn.ttft,
-      streamingSec: latestValidTurn.streamingSec,
-      outputTokens: latestValidTurn.outputTokens,
-      thinkingTokens: latestValidTurn.thinkingTokens,
-      responseTokens: latestValidTurn.responseTokens,
-      isServerExact: Boolean(genMetaBundle?.generatorList?.length)
-    } : null,
-    sparkline: turns.slice(-24).map((t) => ({
-      turn: t.turnIndex,
-      total: t.totalTokens,
-      delta: t.deltaTokens,
-      cache: t.cacheTokens,
-      output: t.outputTokens,
-      tps: t.tps,
-      costUSD: t.costUSD
-    })),
-    turns: turns.slice(-40).reverse().map(({ contextBreakdown: _cb, ...rest }) => rest),
-    audit: {
-      totalSteps,
-      turnsCount: turns.length,
-      userMessages,
-      assistantMessages,
-      toolCallsCount,
-      groups,
-      attachmentTotal,
-      localTotal,
-      attachments,
-      unknownAttachmentsCount
-    }
+    quotaStatus: host.quotaStatus,
+    context: contextPayload,
+    speed: speedPayload,
+    sparkline: sparklinePayload,
+    turns: turnsPayload,
+    audit: auditPayload
   };
   if (scanSnapCache.size > 32) {
     const oldest = scanSnapCache.keys().next().value;
@@ -1552,11 +2000,19 @@ function countSessionFiles(convDir) {
 
 export async function collectTokenHistory(options = {}) {
   const force = Boolean(options.force);
-  if (!force && cachedHistoryResult.data && Date.now() - cachedHistoryResult.at < 12_000) {
+  if (force) {
+    transcriptHistCache.clear();
+  }
+  const host = await getHostUserStatus(force);
+  if (
+    !force &&
+    cachedHistoryResult.data &&
+    cachedHistoryResult.hostSig === host.sig &&
+    Date.now() - cachedHistoryResult.at < 12_000
+  ) {
     return cachedHistoryResult.data;
   }
 
-  const host = await getHostUserStatus(force);
   const rawSettings = loadRawSettings();
   const acctKey = host.plan?.accountKey || rawSettings.lastAccountKey || 'default';
   const customPlan = rawSettings.accounts[acctKey] || rawSettings.accounts.default || null;
@@ -1629,26 +2085,14 @@ export async function collectTokenHistory(options = {}) {
           }
           if (dateKey) trackDate(dateKey);
 
-          let inp = 0, cap = 0, outp = 0, thinking = 0;
-          if (ev.input_tokens != null || ev.output_tokens != null || ev.cache_read_tokens != null) {
-            inp = Number(ev.input_tokens || 0);
-            cap = Number(ev.cache_read_tokens || 0);
-            outp = Number(ev.output_tokens || 0);
-            thinking = Number(ev.thinking_output_tokens || 0);
-          } else if (ev.chatModel?.usage) {
-            inp = Number(ev.chatModel.usage.inputTokens || 0);
-            cap = Number(ev.chatModel.usage.cacheReadTokens || 0);
-            outp = Number(ev.chatModel.usage.outputTokens || 0);
-            thinking = Number(ev.chatModel.usage.thinkingOutputTokens || 0);
-          }
-
+          if (!isModelTurnStep(ev)) continue;
+          const { input: inp, cache: cap, output: outp, thinking } = extractStepUsage(ev);
           const tot = inp + cap + outp;
           if (tot <= 0 || !dateKey) continue;
 
           const stepNum = Number(ev.step_index ?? lineIdx);
           const gmEntry = genCached?.callsByStep?.get(stepNum);
-          const gmModel = gmEntry?.chatModel?.modelDisplayName || gmEntry?.chatModel?.responseModel || gmEntry?.chatModel?.model || '';
-          const rawModel = gmModel || ev.chatModel?.modelDisplayName || ev.chatModel?.responseModel || ev.model || activeModel || '';
+          const rawModel = extractStepModel(ev, gmEntry, activeModel);
           const eventId = String(ev.callId || ev.responseId || `${job.convId}#${stepNum}`);
 
           records.push({
@@ -1818,25 +2262,41 @@ export async function collectTokenHistory(options = {}) {
   const cliConvCount = Math.max(cliJobs.length, cliSessionFiles);
   const totalConversations = desktopConvCount + cliConvCount;
 
-  const etag = `${todayKey}|${analyticsBySource.all.summary.grandTotalTokens}|${analyticsBySource.all.summary.totalSteps}|${effectivePlan.monthlyCNY ?? 'na'}|${effectivePlan.tierName}`;
+  const currentPeriod = {
+    key: monthPrefix,
+    label: `${monthPrefix} 自然月`
+  };
+  const sources = {
+    all: { conversationsCount: totalConversations, transcriptsCount: allJobs.length },
+    desktop: { conversationsCount: desktopConvCount, transcriptsCount: desktopJobs.length },
+    cli: { dirExists: existsSync(cliDir), conversationsCount: cliConvCount, transcriptsCount: cliJobs.length }
+  };
+  const { updatedAt: _planUpdatedAt, ...stablePlan } = effectivePlan || {};
+  const { updatedAt: _uiUpdatedAt, ...stableUiPrefs } = rawSettings.uiPreferences || {};
+  const etag = computeContentEtag('hist', {
+    todayKey,
+    currentPeriod,
+    firstUseDate,
+    sources,
+    planStatus: stablePlan,
+    modelQuotas: host.quotas || [],
+    quotaState: toStableQuotaState(host.quotaStatus),
+    uiPreferences: stableUiPrefs,
+    dailyMapBySource: dailyBySource,
+    analyticsBySource
+  });
 
   const result = {
     ok: true,
     etag,
     updatedAt: new Date().toISOString(),
     todayKey,
-    currentPeriod: {
-      key: monthPrefix,
-      label: `${monthPrefix} 自然月`
-    },
+    currentPeriod,
     firstUseDate,
-    sources: {
-      all: { conversationsCount: totalConversations, transcriptsCount: allJobs.length },
-      desktop: { conversationsCount: desktopConvCount, transcriptsCount: desktopJobs.length },
-      cli: { dirExists: existsSync(cliDir), conversationsCount: cliConvCount, transcriptsCount: cliJobs.length }
-    },
+    sources,
     planStatus: effectivePlan,
     modelQuotas: host.quotas,
+    quotaStatus: host.quotaStatus,
     uiPreferences: rawSettings.uiPreferences || {},
     dailyMapBySource: dailyBySource,
     analyticsBySource,
@@ -1847,7 +2307,7 @@ export async function collectTokenHistory(options = {}) {
     }
   };
 
-  cachedHistoryResult = { at: Date.now(), etag, data: result };
+  cachedHistoryResult = { at: Date.now(), hostSig: host.sig, etag, data: result };
   return result;
 }
 

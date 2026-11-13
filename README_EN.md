@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.6.2-38bdf8)](https://github.com/Dong-Kevin/agy-context-viewer/releases)
+[![Version](https://img.shields.io/badge/version-v1.6.3-38bdf8)](https://github.com/Dong-Kevin/agy-context-viewer/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#quick-install)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#quick-install)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#privacy--security)
@@ -107,20 +107,26 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
 
 ## Quick Install
 
-> **Prerequisite**: `Node.js >= 18` installed locally. Re-running any install command performs an atomic, zero-downtime hot upgrade.
+> **Prerequisites & Platform Capabilities**:
+> - `Node.js >= 18` installed locally.
+> - **macOS Native Menu Bar & Pinned Window**: Initial compilation requires the local Swift toolchain (Xcode Command Line Tools: `xcode-select --install`). On **Windows / Linux**, the embedded Aux Pane Sidecar, `agy-context` CLI, and `web` dashboard work identically, while `float` falls back to a standalone browser `--app` window (without a native OS menu bar icon or always-on-top window level).
+> - **Standalone Terminal Mode**: Outside an Antigravity host session (where local language-server address & credentials are not injected), live plan/quota RPCs degrade gracefully while local session & multi-source token analytics remain fully available.
 
 ### Option 1: macOS / Linux One-Liner (Recommended)
 
-Installs the plugin, compiles & launches the native macOS Menu Bar helper, and registers the `agy-context` CLI command:
+Installs the plugin, compiles & launches the native macOS Menu Bar helper, and registers the `agy-context` CLI command (set `REF=v1.6.3` to pin an immutable release tag):
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/main/install.sh)"
+# Pin a specific release tag:
+# REF=v1.6.3 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/v1.6.3/install.sh)"
 ```
 
 ### Option 2: Windows PowerShell One-Liner
 
 ```powershell
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/main/install.ps1 | iex
+# Pin a specific release tag: $env:REF="v1.6.3"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/v1.6.3/install.ps1 | iex
 ```
 
 ### Option 3: Install via Official `agy` CLI
@@ -137,7 +143,7 @@ cd agy-context-viewer
 ./install.sh          # On Windows PowerShell: .\install.ps1
 ```
 
-Or download `context-viewer-v1.6.2.zip` from [Releases](https://github.com/Dong-Kevin/agy-context-viewer/releases), extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
+Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` from [Releases](https://github.com/Dong-Kevin/agy-context-viewer/releases), verify the checksum via `shasum -a 256 -c context-viewer-v1.6.3.zip.sha256`, extract it, and run `./context-viewer/install.sh` (or `agy plugin install ./context-viewer`).
 
 ---
 
@@ -206,7 +212,7 @@ agy-context-viewer/
 │       ├── sidecar.json               # Official Aux Pane UI Sidecar configuration
 │       ├── main.mjs                   # Sidecar & loopback HTTP server entrypoint
 │       ├── collector.mjs              # Read-only session parser, active-chat follower & dual-quota collector
-│       ├── pricing.mjs                # Model context limits, API pricing, Ultra/Family presets & FX rates
+│       ├── pricing.mjs                # Model generation matching, API pricing, Ultra/Family presets & FX rates
 │       ├── float_window.mjs           # Pinned floating window & macOS Menu Bar daemon controller
 │       ├── native_float_macos.swift   # Native macOS NSStatusItem + WKWebView zero-port IPC bridge
 │       ├── cli.mjs                    # agy-context ANSI terminal dashboard & control CLI
@@ -214,7 +220,7 @@ agy-context-viewer/
 │       ├── styles.css                 # Strict --cv-* namespaced styles (host light/dark adaptive)
 │       └── app.js                     # Frontend rendering & interactive state
 └── scripts/
-    ├── verify.mjs                     # Manifest, syntax, privacy/PNG-chunk audit, CSS isolation & smoke tests
+    ├── verify.mjs                     # Manifest, syntax, pattern/PNG-chunk check, CSS isolation & behavioral tests
     └── package-release.mjs            # Zero-dependency cross-platform Release ZIP & SHA-256 packager
 ```
 
@@ -222,17 +228,17 @@ agy-context-viewer/
 
 ## Privacy & Security
 
-- **100% Local Read-Only Telemetry**: Reads only local session metadata under `~/.gemini/antigravity/brain/`, `~/.gemini/antigravity-cli/brain/`, `~/.gemini/antigravity/annotations/`, and read-only `127.0.0.1` language-server status endpoints. **Zero conversation prompts, file paths, account credentials, or analytics ever leave your machine.**
-- **Redacted by Default**: Account emails displayed in the UI are automatically masked, long URLs are stripped from hover tooltips, and standalone web mode binds strictly to loopback `127.0.0.1`.
-- **Isolated Plugin Storage**: User preferences (theme, palette, menu bar mode, custom subscription overrides) are stored cleanly under `~/.gemini/antigravity/sidecar_data/context-viewer/dashboard/data/settings_v1.json` without touching `~/.gemini/config/config.json`.
+- **100% Local Read-Only Telemetry & Zero External Assets**: Reads only local session metadata under `~/.gemini/antigravity/brain/`, `~/.gemini/antigravity-cli/brain/`, `~/.gemini/antigravity/annotations/`, and read-only `127.0.0.1` language-server status endpoints, using strictly host and local system font stacks (zero external CDN or Google Fonts requests). **Zero conversation prompts, file paths, account credentials, or analytics ever leave your machine.**
+- **Redaction & Loopback Write Protection**: Account emails displayed in the UI are automatically masked and long URLs are stripped from hover tooltips; standalone web and fallback HTTP modes bind strictly to `127.0.0.1` and enforce `Host` / `Origin` checks, `application/json` content types, and per-session CSRF tokens (`X-CV-Token`) on write routes.
+- **Isolated Plugin Storage & Safe Retention**: User preferences (theme, palette, menu bar mode, custom subscription overrides) are stored cleanly under `~/.gemini/antigravity/sidecar_data/context-viewer/dashboard/data/settings_v1.json` without touching `~/.gemini/config/config.json`, and are intentionally preserved across upgrades and uninstalls.
 
 ---
 
 ## Upgrade & Uninstall
 
-- **Hot Upgrade**: Re-run any installation command above (e.g., `./install.sh` or the `curl` one-liner) to atomically update files and seamlessly reload the Menu Bar helper.
-- **Clean Uninstall**:
-  - Via script: `./install.sh --uninstall` on macOS / Linux (or append `-s -- --uninstall` to the `curl` command); `.\install.ps1 -Uninstall` on Windows
+- **In-Place Hot Upgrade**: Re-run any installation command above (e.g., `./install.sh` or `.\install.ps1`) to validate required runtime files, sync updated scripts in place, and replace `sidecar.json` last via atomic rename for a smooth reload.
+- **Uninstall & Data Cleanup**:
+  - Via script: `./install.sh --uninstall` on macOS / Linux (or append `-s -- --uninstall` to the `curl` command); `.\install.ps1 -Uninstall` on Windows (removes the plugin directory and CLI shims while preserving saved preferences; delete `~/.gemini/antigravity/sidecar_data/context-viewer` manually if you also want to reset saved preferences)
   - Via `agy` CLI: `agy plugin uninstall context-viewer`
   - Via Desktop IDE: Open `customization://context-viewer` and click **Uninstall**
 
@@ -241,8 +247,8 @@ agy-context-viewer/
 ## Local Development & Verification
 
 ```bash
-node scripts/verify.mjs           # Manifest spec, JS syntax, privacy + PNG metadata audit, CSS isolation & smoke test
-node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.6.2.zip + .sha256
+node scripts/verify.mjs           # Manifest spec, JS syntax, pattern + PNG metadata check, CSS isolation & behavioral tests
+node scripts/package-release.mjs  # Build lightweight dist/context-viewer-v1.6.3.zip + .sha256
 ```
 
 ---

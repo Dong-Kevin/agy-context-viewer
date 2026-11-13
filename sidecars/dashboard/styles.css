@@ -35,8 +35,8 @@
   --heat-3: #8b5cf6;
   --heat-4: #6d28d9;
 
-  --font-sans: var(--font-family, "Google Sans Flex", "Google Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif);
-  --font-mono: var(--editor-font-family, "Google Sans Code", "SF Mono", ui-monospace, Menlo, Consolas, monospace);
+  --font-sans: var(--font-family, "Google Sans Flex", "Google Sans", "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif);
+  --font-mono: var(--editor-font-family, "Google Sans Code", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace);
 
   --r-sm: 6px;
   --r-md: 10px;

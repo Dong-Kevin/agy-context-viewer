@@ -13,6 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,6 +31,13 @@ import { controlFloatWindow, getFloatWindowStatus } from './float_window.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 const PLUGIN_DIR_ID = basename(PLUGIN_ROOT);
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'plugin.json'), 'utf-8')).version || '1.6.3';
+  } catch {
+    return '1.6.3';
+  }
+})();
 
 const useColor = Boolean((process.stdout.isTTY || process.env.FORCE_COLOR) && !process.env.NO_COLOR);
 const c = {
@@ -73,7 +81,10 @@ function fmtUsd(n, digits = 2) {
 }
 
 function renderBar(pct, width = 20, invertWarn = false) {
-  const clamped = Math.max(0, Math.min(100, Number(pct || 0)));
+  if (pct === null || pct === undefined || Number.isNaN(Number(pct))) {
+    return `${c.dim}[${'░'.repeat(width)}]${c.reset}`;
+  }
+  const clamped = Math.max(0, Math.min(100, Number(pct)));
   const filled = Math.round((clamped / 100) * width);
   const barStr = `${'█'.repeat(filled)}${'░'.repeat(Math.max(0, width - filled))}`;
   let col = c.green;
@@ -95,7 +106,7 @@ function normalizeMenubarModeArg(raw) {
 
 function printHelp() {
   const lines = [
-    `${c.bold}Antigravity Context & Token Viewer CLI (v1.6.2)${c.reset}`,
+    `${c.bold}Antigravity Context & Token Viewer CLI (v${PLUGIN_VERSION})${c.reset}`,
     '',
     '用法：',
     '  agy-context [status] [conversationId]           终端可视化汇总（自动识别桌面端与 agy CLI 最新活跃会话）',
@@ -291,11 +302,12 @@ function buildCompactSummary(ctx, hist) {
       source: activeConvMeta?.source || 'desktop',
       title: ctx.conversationTitle || '未命名会话',
       model: cx.model || '未识别模型',
-      usedTokens: cx.used ?? 0,
-      budgetTokens: cx.budget ?? 0,
+      usedTokens: cx.used ?? null,
+      budgetTokens: cx.budget ?? null,
+      budgetSource: cx.budgetSource || (cx.budget ? 'server' : 'unknown'),
       pendingTokens: cx.pendingTokens ?? 0,
       usagePercent: cx.percent ?? null,
-      usedFormatted: `${fmtTok(cx.used)} / ${fmtTok(cx.budget)} (${cx.percent ?? '--'}%)`,
+      usedFormatted: `${fmtTok(cx.used)} / ${cx.budget ? fmtTok(cx.budget) : '未知'} (${cx.percent != null ? `${cx.percent}%` : '容量未知'})`,
       cacheHitPercent: cx.cacheHitPercent ?? null,
       speed: {
         latestTps: sp.tps ?? null,
@@ -342,11 +354,20 @@ function buildCompactSummary(ctx, hist) {
       allTimeHybridCostUSD: Number((costAll.totalCostUSD || 0).toFixed(2)),
       plan: `${plan.tierName || '未连接宿主'} (${plan.symbol || '$'}${plan.effectivePrice ?? '--'}/${plan.billingCycle || '月'})`
     },
-    quotas: (hist.modelQuotas || []).map((q) => ({
-      label: q.title || q.groupLabel || q.label || '模型配额池',
-      remainingPercent: q.remainingPercent,
-      resetText: q.resetTimeZh || q.resetCountdown || ''
-    }))
+    quotaStatus: hist.quotaStatus || ctx.quotaStatus || null,
+    quotas: (hist.modelQuotas || []).map((q) => {
+      const p5 = typeof q.fiveHour?.remainingPercent === 'number'
+        ? q.fiveHour.remainingPercent
+        : (!q.fiveHour && typeof q.remainingPercent === 'number' ? q.remainingPercent : null);
+      const pW = typeof q.weekly?.remainingPercent === 'number' ? q.weekly.remainingPercent : null;
+      return {
+        label: q.title || q.groupLabel || q.label || '模型配额池',
+        remainingPercent: p5 !== null && pW !== null ? Math.min(p5, pW) : (p5 ?? pW ?? null),
+        fiveHourPercent: p5,
+        weeklyPercent: pW,
+        resetText: q.fiveHour?.resetTimeZh || q.weekly?.resetTimeZh || q.resetTimeZh || q.resetCountdown || ''
+      };
+    })
   };
 }
 
@@ -357,7 +378,7 @@ function printPrettyStatus(ctx, hist) {
   const srcBadge = cv.source === 'cli' ? '[CLI]' : '[Desktop]';
 
   const out = [];
-  out.push(`${c.bold}${c.magenta}◈ 上下文与 Token 看板${c.reset} ${c.dim}(v1.6.2 · Desktop + agy CLI)${c.reset}`);
+  out.push(`${c.bold}${c.magenta}◈ 上下文与 Token 看板${c.reset} ${c.dim}(v${PLUGIN_VERSION} · Desktop + agy CLI)${c.reset}`);
   out.push(`${c.dim}${'─'.repeat(64)}${c.reset}`);
 
   if (!cv.id) {
@@ -365,7 +386,9 @@ function printPrettyStatus(ctx, hist) {
   } else {
     out.push(`${c.bold}当前会话${c.reset}  ${c.cyan}${srcBadge}${c.reset} ${cv.title} ${c.dim}(${cv.id.slice(0, 8)})${c.reset}`);
     out.push(`活跃模型  ${c.bold}${cv.model}${c.reset}  ·  状态：${cv.status}`);
-    out.push(`窗口水位  ${renderBar(cv.usagePercent)} ${c.bold}${cv.usagePercent ?? '--'}%${c.reset}  (${fmtTok(cv.usedTokens)} / ${fmtTok(cv.budgetTokens)}${cv.pendingTokens > 0 ? `，含待发送 +${fmtTok(cv.pendingTokens)}` : ''})`);
+    const budgetText = cv.budgetTokens ? fmtTok(cv.budgetTokens) : '未知上限';
+    const pctText = cv.usagePercent != null ? `${cv.usagePercent}%` : (cv.usedTokens != null ? '容量未知' : '--%');
+    out.push(`窗口水位  ${renderBar(cv.usagePercent)} ${c.bold}${pctText}${c.reset}  (${fmtTok(cv.usedTokens)} / ${budgetText}${cv.pendingTokens > 0 ? `，含待发送 +${fmtTok(cv.pendingTokens)}` : ''})`);
     out.push(`缓存速度  单轮缓存命中 ${c.bold}${cv.cacheHitPercent != null ? `${cv.cacheHitPercent}%` : '--'}${c.reset}  ·  最新 ${c.cyan}${cv.speed.latestTps ? `${cv.speed.latestTps} tok/s` : '--'}${c.reset} (均值 ${cv.speed.avgTps ?? '--'} / 峰值 ${cv.speed.peakTps ?? '--'} tok/s, TTFT ${cv.speed.ttftSec ?? '--'}s)`);
     out.push(`会话吞吐  共 ${cv.sessionTotals.turnsCount} 轮  ·  累计总吞吐 ${c.bold}${fmtTok(cv.sessionTotals.grossTokens)}${c.reset} (缓存 ${fmtTok(cv.sessionTotals.cacheReadTokens)} · 新增输入 ${fmtTok(cv.sessionTotals.freshInputTokens)} · 输出 ${fmtTok(cv.sessionTotals.outputTokens)})`);
     out.push(`参考折算  本轮 ${c.bold}${fmtUsd(cv.roundApiCostUSD, 4)}${c.reset}  ·  全会话累计 ${c.bold}${fmtUsd(cv.sessionApiCostUSD, 4)}${c.reset}`);
@@ -389,10 +412,24 @@ function printPrettyStatus(ctx, hist) {
 
   if (s.quotas.length > 0) {
     out.push('');
-    out.push(`${c.bold}实时配额池余量${c.reset}`);
+    const syncNote = s.quotaStatus?.stale
+      ? ` ${c.yellow}(缓存快照 · 上次同步 ${s.quotaStatus.lastSuccessAt || '--'})${c.reset}`
+      : (s.quotaStatus?.summaryStale ? ` ${c.yellow}(多窗口摘要降级)${c.reset}` : '');
+    out.push(`${c.bold}实时配额池余量${c.reset}${syncNote}`);
     for (const q of s.quotas.slice(0, 4)) {
-      out.push(`  ${renderBar(q.remainingPercent, 12, true)} ${String(q.remainingPercent ?? '--').padStart(5)}%  ${q.label}${q.resetText ? ` ${c.dim}(重置：${q.resetText})${c.reset}` : ''}`);
+      let pctCol = '余量未知';
+      if (q.fiveHourPercent !== null && q.weeklyPercent !== null) {
+        pctCol = `5h ${q.fiveHourPercent}% · 周 ${q.weeklyPercent}%`;
+      } else if (q.fiveHourPercent !== null) {
+        pctCol = `${String(q.fiveHourPercent).padStart(5)}%`;
+      } else if (q.weeklyPercent !== null) {
+        pctCol = `周 ${q.weeklyPercent}%`;
+      }
+      out.push(`  ${renderBar(q.remainingPercent, 12, true)} ${pctCol}  ${q.label}${q.resetText ? ` ${c.dim}(重置：${q.resetText})${c.reset}` : ''}`);
     }
+  } else if (s.quotaStatus?.state === 'error') {
+    out.push('');
+    out.push(`${c.bold}实时配额池余量${c.reset} ${c.yellow}(宿主语言服务请求失败，暂未获取到配额池)${c.reset}`);
   }
 
   out.push(`${c.dim}${'─'.repeat(64)}${c.reset}`);

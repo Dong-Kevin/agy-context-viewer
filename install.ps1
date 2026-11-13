@@ -22,10 +22,15 @@ $PluginsRoot = if ($env:ANTIGRAVITY_PLUGINS_DIR) { $env:ANTIGRAVITY_PLUGINS_DIR 
 $TargetDir = Join-Path $PluginsRoot $PluginDirName
 $BinDir = if ($env:ANTIGRAVITY_BIN_DIR) { $env:ANTIGRAVITY_BIN_DIR } else { Join-Path $HOME ".local\bin" }
 $CliWrapper = Join-Path $BinDir "agy-context.cmd"
+$CliLoader = Join-Path $BinDir "agy-context-loader.mjs"
 $RepoSlug = if ($env:REPO) { $env:REPO } else { "Dong-Kevin/agy-context-viewer" }
 $GitRef = if ($env:REF) { $env:REF } else { "main" }
 
 if ($Uninstall) {
+  $ExistingCli = Join-Path $TargetDir "sidecars\dashboard\cli.mjs"
+  if ((Test-Path $ExistingCli) -and (Get-Command node -ErrorAction SilentlyContinue)) {
+    try { & node $ExistingCli float quit 2>&1 | Out-Null } catch {}
+  }
   if (Test-Path $TargetDir) {
     Remove-Item -Recurse -Force $TargetDir
     Write-Host "[context-viewer] 已移除插件目录：$TargetDir" -ForegroundColor Green
@@ -36,6 +41,10 @@ if ($Uninstall) {
     Remove-Item -Force $CliWrapper
     Write-Host "[context-viewer] 已移除命令行入口：$CliWrapper" -ForegroundColor Green
   }
+  if (Test-Path $CliLoader) {
+    Remove-Item -Force $CliLoader
+  }
+  Write-Host "[context-viewer] 用户本地会话归档与统计偏好设置已安全保留，未做删除。" -ForegroundColor Cyan
   exit 0
 }
 
@@ -74,7 +83,28 @@ try {
     $SourceDir = $FoundManifest.Directory.FullName
   }
 
-  # 3. Copy clean runtime files in-place (never stage inside $PluginsRoot which SidecarManager scans live)
+  # 3. Validate & stage all required runtime files in system temp before touching $TargetDir
+  $RequiredDashFiles = @(
+    "package.json", "pricing.mjs", "collector.mjs", "float_window.mjs",
+    "native_float_macos.swift", "cli.mjs", "index.html", "styles.css",
+    "app.js", "main.mjs", "sidecar.json"
+  )
+  foreach ($ReqRel in @("plugin.json", "assets\logo.svg", "skills\context-viewer\SKILL.md", "skills\context-viewer\scripts\status.mjs")) {
+    if (-not (Test-Path (Join-Path $SourceDir $ReqRel))) {
+      throw "安装包缺少必需文件：$ReqRel"
+    }
+  }
+  foreach ($DashFile in $RequiredDashFiles) {
+    if (-not (Test-Path (Join-Path $SourceDir "sidecars\dashboard\$DashFile"))) {
+      throw "安装包缺少必需文件：sidecars\dashboard\$DashFile"
+    }
+  }
+
+  $ExistingCli = Join-Path $TargetDir "sidecars\dashboard\cli.mjs"
+  if (Test-Path $ExistingCli) {
+    try { & node $ExistingCli float quit 2>&1 | Out-Null } catch {}
+  }
+
   New-Item -ItemType Directory -Path $PluginsRoot -Force | Out-Null
   New-Item -ItemType Directory -Path (Join-Path $TargetDir "sidecars\dashboard") -Force | Out-Null
 
@@ -90,22 +120,34 @@ try {
   Copy-Item (Join-Path $SourceDir "assets") $AssetsTarget -Recurse -Force
   Copy-Item (Join-Path $SourceDir "skills") $SkillsTarget -Recurse -Force
 
-  foreach ($DashFile in @("package.json", "pricing.mjs", "collector.mjs", "float_window.mjs", "native_float_macos.swift", "cli.mjs", "index.html", "styles.css", "app.js", "main.mjs", "sidecar.json")) {
+  foreach ($DashFile in @("package.json", "pricing.mjs", "collector.mjs", "float_window.mjs", "native_float_macos.swift", "cli.mjs", "index.html", "styles.css", "app.js", "main.mjs")) {
     Copy-Item (Join-Path $SourceDir "sidecars\dashboard\$DashFile") (Join-Path $TargetDir "sidecars\dashboard\$DashFile") -Force
   }
+  $SidecarTmp = Join-Path $TargetDir "sidecars\dashboard\.sidecar.json.tmp"
+  Copy-Item (Join-Path $SourceDir "sidecars\dashboard\sidecar.json") $SidecarTmp -Force
+  Move-Item -Path $SidecarTmp -Destination (Join-Path $TargetDir "sidecars\dashboard\sidecar.json") -Force
   try { & node (Join-Path $TargetDir "sidecars\dashboard\cli.mjs") --sync-manifest 2>&1 | Out-Null } catch {}
 
-  # 4. Create `agy-context.cmd` CLI shim
+  # 4. Create codepage-independent Unicode-safe `agy-context.cmd` + `agy-context-loader.mjs`
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  $CmdContent = "@echo off`r`nnode `"$TargetDir\sidecars\dashboard\cli.mjs`" %*`r`n"
-  Set-Content -Path $CliWrapper -Value $CmdContent -Encoding ASCII
+  $CliEntry = [System.IO.Path]::GetFullPath((Join-Path $TargetDir "sidecars\dashboard\cli.mjs"))
+  $CliEntryB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CliEntry))
+  $LoaderContent = @(
+    "import { pathToFileURL } from 'node:url';",
+    "const entry = Buffer.from('$CliEntryB64', 'base64').toString('utf8');",
+    "process.argv[1] = entry;",
+    "await import(pathToFileURL(entry).href);"
+  ) -join "`n"
+  $CmdContent = "@echo off`r`nnode `"%~dp0agy-context-loader.mjs`" %*`r`n"
+  [System.IO.File]::WriteAllText($CliLoader, "$LoaderContent`n", [System.Text.Encoding]::ASCII)
+  [System.IO.File]::WriteAllText($CliWrapper, $CmdContent, [System.Text.Encoding]::ASCII)
 
   # 5. Enable via agy CLI if available
   if (Get-Command agy -ErrorAction SilentlyContinue) {
     try { & agy plugin enable $PluginDirName 2>&1 | Out-Null } catch {}
   }
 
-  $Ver = (Get-Content (Join-Path $TargetDir "plugin.json") -Raw | ConvertFrom-Json).version
+  $Ver = (Get-Content (Join-Path $TargetDir "plugin.json") -Raw -Encoding UTF8 | ConvertFrom-Json).version
   Write-Host ""
   Write-Host "[context-viewer] 安装完成！版本：$Ver" -ForegroundColor Green
   Write-Host "  • Antigravity 桌面端：在 Customizations -> Plugins 中开启「上下文与 Token 看板」，随后从右侧栏打开看板。"

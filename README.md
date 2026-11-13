@@ -2,7 +2,7 @@
 
 # Antigravity Context & Token Viewer (`agy-context-viewer`)
 
-[![Version](https://img.shields.io/badge/version-v1.6.2-38bdf8)](https://github.com/Dong-Kevin/agy-context-viewer/releases)
+[![Version](https://img.shields.io/badge/version-v1.6.3-38bdf8)](https://github.com/Dong-Kevin/agy-context-viewer/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-818cf8)](#一键安装)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2018-22c55e)](#一键安装)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-a855f7)](#隐私与安全机制)
@@ -107,20 +107,26 @@
 
 ## 一键安装
 
-> **前置要求**：本机已安装 `Node.js >= 18`。后续版本更新只需重新运行同一条命令即可平滑热升级。
+> **前置要求与平台能力说明**：
+> - 本机需已安装 `Node.js >= 18`。
+> - **macOS 原生菜单栏与置顶小窗**：首次编译需本机具备 Swift 编译工具链（Xcode Command Line Tools，未安装时运行 `xcode-select --install`）；**Windows / Linux** 下宿主内嵌辅助栏、`agy-context` 终端看板与 `web` 模式完整可用，`float` 命令则回退为独立浏览器小窗（无系统菜单栏常驻图标与原生置顶层级）。
+> - **脱离宿主独立运行**：在未由 Antigravity 宿主注入本地语言服务地址与凭据的纯外部终端中，实时订阅档位与 `5h / Week` 配额查询会自动降级，本地会话归档与历史统计不受影响。
 
 ### 方式 1：macOS / Linux 一键脚本安装（推荐）
 
-自动安装插件、编译并启动 macOS 顶部菜单栏常驻守护进程，同时注册终端 `agy-context` 命令：
+自动安装插件、编译并启动 macOS 顶部菜单栏常驻守护进程，同时注册终端 `agy-context` 命令（如需锁定特定发布版本，可在命令前加 `REF=v1.6.3`）：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/main/install.sh)"
+# 锁定固定版本 tag 示例：
+# REF=v1.6.3 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/v1.6.3/install.sh)"
 ```
 
 ### 方式 2：Windows PowerShell 一键安装
 
 ```powershell
 irm https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/main/install.ps1 | iex
+# 锁定固定版本 tag 示例：$env:REF="v1.6.3"; irm https://raw.githubusercontent.com/Dong-Kevin/agy-context-viewer/v1.6.3/install.ps1 | iex
 ```
 
 ### 方式 3：通过官方 `agy` CLI 安装
@@ -137,7 +143,7 @@ cd agy-context-viewer
 ./install.sh          # Windows PowerShell 执行：.\install.ps1
 ```
 
-也可在 [Releases](https://github.com/Dong-Kevin/agy-context-viewer/releases) 页面下载最新的 `context-viewer-v1.6.2.zip`，解压后执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
+也可在 [Releases](https://github.com/Dong-Kevin/agy-context-viewer/releases) 页面下载 `context-viewer-v1.6.3.zip` 与对应的 `.sha256` 校验文件，通过 `shasum -a 256 -c context-viewer-v1.6.3.zip.sha256` 核验完整性后解压执行 `./context-viewer/install.sh`（或 `agy plugin install ./context-viewer`）。
 
 ---
 
@@ -206,7 +212,7 @@ agy-context-viewer/
 │       ├── sidecar.json               # 官方 Aux Pane UI Sidecar 声明
 │       ├── main.mjs                   # Sidecar 与本地只读 HTTP 服务入口
 │       ├── collector.mjs              # 会话归档解析、活跃对话跟随与双维度配额只读采集器
-│       ├── pricing.mjs                # 模型窗口上限、API 定价、Ultra/家庭组与多币种订阅参考库
+│       ├── pricing.mjs                # 模型代际识别、API 定价、Ultra/家庭组与多币种订阅参考库
 │       ├── float_window.mjs           # 右侧置顶小窗与 macOS 顶部菜单栏守护进程控制器
 │       ├── native_float_macos.swift   # macOS 原生 NSStatusItem + WKWebView 零端口内存桥接实现
 │       ├── cli.mjs                    # agy-context 终端彩色看板与快捷控制入口
@@ -214,7 +220,7 @@ agy-context-viewer/
 │       ├── styles.css                 # --cv-* 命名空间完全隔离样式表（自适应亮暗主题）
 │       └── app.js                     # 看板前端渲染与交互逻辑
 └── scripts/
-    ├── verify.mjs                     # 清单规范、语法、全仓隐私/PNG 元数据审计、CSS 隔离与冒烟测试
+    ├── verify.mjs                     # 清单规范、语法、敏感模式/PNG 元数据检查、CSS 隔离与行为回归测试
     └── package-release.mjs            # 零依赖跨平台 Release ZIP 与 SHA-256 打包工具
 ```
 
@@ -222,17 +228,17 @@ agy-context-viewer/
 
 ## 隐私与安全机制
 
-- **100% 本地只读采集**：仅只读解析本机 `~/.gemini/antigravity/brain/`、`~/.gemini/antigravity-cli/brain/`、`~/.gemini/antigravity/annotations/` 归档元数据与本机 `127.0.0.1` 语言服务只读状态接口，**绝不向任何外部服务器发送对话正文、文件路径、账号信息或遥测数据**。
-- **敏感信息默认脱敏**：界面显示的当前账号邮箱默认自动掩码脱敏，悬停提示自动剥离冗长 URL；独立 Web 模式严格仅绑定本机回环地址 `127.0.0.1`。
-- **配置完全隔离**：外观、菜单栏模式与订阅自定义参数独立保存在 `~/.gemini/antigravity/sidecar_data/context-viewer/dashboard/data/settings_v1.json`，不触碰宿主核心配置，卸载不留残余污染。
+- **100% 本地只读采集与零外部资源外链**：仅只读解析本机 `~/.gemini/antigravity/brain/`、`~/.gemini/antigravity-cli/brain/`、`~/.gemini/antigravity/annotations/` 归档元数据与本机 `127.0.0.1` 语言服务只读状态接口，前端完全使用宿主与系统本地字体栈（零外部 CDN / Google Fonts 请求），**绝不向任何外部服务器发送对话正文、文件路径、账号信息或遥测数据**。
+- **敏感信息脱敏与本地 HTTP 写保护**：界面显示的当前账号邮箱默认自动掩码脱敏，悬停提示自动剥离冗长 URL；独立 Web 模式与浏览器回退小窗严格仅绑定本机回环地址 `127.0.0.1`，并对写接口强制校验 `Host` / `Origin`、`application/json` 类型与进程级随机令牌（`X-CV-Token`）。
+- **配置隔离与安全保留**：外观、菜单栏模式与订阅自定义参数独立保存在 `~/.gemini/antigravity/sidecar_data/context-viewer/dashboard/data/settings_v1.json`，不触碰宿主 `~/.gemini/config/config.json` 核心配置；卸载插件时默认保留上述用户偏好与历史会话归档。
 
 ---
 
 ## 更新与卸载
 
-- **平滑热升级**：重新执行上方任一安装命令（如 `./install.sh` 或在线 `curl` 脚本），脚本会自动完成原子替换并平滑重启菜单栏守护进程。
-- **干净卸载**：
-  - 脚本卸载：macOS / Linux 运行 `./install.sh --uninstall`（或在线脚本末尾加 `-s -- --uninstall`）；Windows 运行 `.\install.ps1 -Uninstall`
+- **就地平滑升级**：重新执行上方任一安装命令（如 `./install.sh` 或 `.\install.ps1`），脚本会先校验完整运行时文件、就地更新脚本并最后原子重命名替换 `sidecar.json` 触发平滑重载。
+- **卸载与数据清理**：
+  - 脚本卸载：macOS / Linux 运行 `./install.sh --uninstall`（或在线脚本末尾加 `-s -- --uninstall`）；Windows 运行 `.\install.ps1 -Uninstall`（移除插件目录与命令行入口，保留用户偏好设置；如需连同看板偏好一并清除，可手动删除 `~/.gemini/antigravity/sidecar_data/context-viewer`）
   - `agy` CLI 卸载：`agy plugin uninstall context-viewer`
   - 桌面端卸载：在 `customization://context-viewer` 插件详情页点击 **Uninstall**
 
@@ -241,8 +247,8 @@ agy-context-viewer/
 ## 本地开发与发布校验
 
 ```bash
-node scripts/verify.mjs           # 运行清单规范、JS 语法、隐私与图片元数据审计、CSS 隔离及冒烟测试
-node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.6.2.zip 与 .sha256
+node scripts/verify.mjs           # 运行清单规范、JS 语法、常见敏感模式与 PNG 元数据块检查、CSS 隔离及行为回归测试
+node scripts/package-release.mjs  # 生成轻量发布包 dist/context-viewer-v1.6.3.zip 与 .sha256
 ```
 
 ---

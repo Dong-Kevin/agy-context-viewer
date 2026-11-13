@@ -6,10 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
   <title>上下文与 Token 看板</title>
   <script src="/preload.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:ROND,opsz,slnt,wdth,wght@0..100,6..144,-10..0,92..100,100..1000&family=Google+Sans+Code:ital,wght@0,300..800;1,300..800&display=swap">
-  <link rel="stylesheet" href="/styles.css?v=1.6.2">
+  <link rel="stylesheet" href="/styles.css?v=1.6.3">
 </head>
 <body>
   <div class="app-shell">
@@ -488,7 +485,10 @@
 
           <!-- Model Quota Pools List -->
           <div id="quota-pools-wrap" class="quota-pools-wrap hidden">
-            <div class="sub-heading">实时模型配额池余量</div>
+            <div class="sub-heading-row">
+              <span class="sub-heading no-margin">实时模型配额池余量</span>
+              <span id="quota-sync-pill" class="status-pill warn hidden"></span>
+            </div>
             <div id="quota-pools-list" class="quota-pools-list"></div>
           </div>
 
@@ -642,6 +642,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=1.6.2"></script>
+  <script src="/app.js?v=1.6.3"></script>
 </body>
 </html>

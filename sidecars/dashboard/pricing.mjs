@@ -145,16 +145,19 @@ export function normalizeModelId(raw, dynamicMap = null) {
   if (!s || s === 'none') return null;
   if (dynamicMap && dynamicMap[s]) return dynamicMap[s];
   if (PLACEHOLDER_MODEL_MAP[s]) return PLACEHOLDER_MODEL_MAP[s];
-  if (s.includes('4-carbon') || s.includes('4 carbon') || s.includes('carbon')) return 'gemini-4-carbon';
-  if (s.includes('4-argon') || s.includes('4 argon') || s.includes('argon')) return 'gemini-4-argon';
-  if (s.includes('3.8-flash') || s.includes('3.8 flash') || s.includes('flash-n')) return 'gemini-3.8-flash';
-  if (s.includes('claude') && s.includes('opus')) return 'claude-opus-5-5';
-  if (s.includes('claude') && s.includes('sonnet')) return 'claude-sonnet-5-5';
-  if (s.includes('gpt-oss') || s.includes('gpt_oss')) return 'gpt-oss-120b';
-  if (s.includes('3.1-pro') || s.includes('3.1 pro')) return 'gemini-3.1-pro-preview';
-  if (s.includes('3.5-flash-lite') || s.includes('3.5 flash-lite') || s.includes('flash-lite')) return 'gemini-3.5-flash-lite';
-  if (s.includes('2.5-pro') || s.includes('2.5 pro')) return 'gemini-2.5-pro';
-  if (s.includes('flash')) return 'gemini-3.8-flash';
+  if (Object.prototype.hasOwnProperty.call(MODEL_DISPLAY_NAMES, s)) return s;
+
+  // Match strictly against known model generations; unknown or older generations return null
+  // so they are never mis-billed at another generation's retail rate.
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*carbon(?:$|[^a-z0-9])/.test(s)) return 'gemini-4-carbon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?4[-_\s]*argon(?:$|[^a-z0-9])/.test(s)) return 'gemini-4-argon';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?3[._-]5[-_\s]*flash[-_\s]*lite(?:$|[^a-z0-9])/.test(s)) return 'gemini-3.5-flash-lite';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*)?3[._-]8[-_\s]*flash(?:$|[^a-z0-9])/.test(s) && !/flash[-_\s]*lite/.test(s)) return 'gemini-3.8-flash';
+  if (/\bclaude\b/.test(s) && /(?:opus[-_\s]*5[._-]5|5[._-]5[-_\s]*opus)(?:$|[^0-9])/.test(s)) return 'claude-opus-5-5';
+  if (/\bclaude\b/.test(s) && /(?:sonnet[-_\s]*5[._-]5|5[._-]5[-_\s]*sonnet)(?:$|[^0-9])/.test(s)) return 'claude-sonnet-5-5';
+  if (/(?:^|[\s/_-])gpt[-_\s]*oss[-_\s]*120b(?:$|[^a-z0-9])/.test(s)) return 'gpt-oss-120b';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*3[._-]1|3\.1)[-_\s]*pro(?:$|[^a-z0-9])/.test(s)) return 'gemini-3.1-pro-preview';
+  if (/(?:^|[\s/_-])(?:gemini[-_\s]*2[._-]5|2\.5)[-_\s]*pro(?:$|[^a-z0-9])/.test(s)) return 'gemini-2.5-pro';
   return null;
 }
 
@@ -186,121 +189,282 @@ export function formatResetTimeZh(isoStr) {
   }
 }
 
-function matchQuotaSummaryGroup(textHint, quotaSummaryGroups = []) {
-  if (!Array.isArray(quotaSummaryGroups) || !quotaSummaryGroups.length) return null;
-  const s = String(textHint || '').toLowerCase();
-  const wantGemini = s.includes('gemini');
-  const want3p = s.includes('claude') || s.includes('gpt') || s.includes('opus') || s.includes('sonnet');
-  for (const g of quotaSummaryGroups) {
-    const gText = `${g.displayName || ''} ${g.description || ''} ${g.buckets?.[0]?.bucketId || ''}`.toLowerCase();
-    if (wantGemini && gText.includes('gemini')) return g;
-    if (want3p && (gText.includes('claude') || gText.includes('gpt') || gText.includes('3p'))) return g;
+function getSummaryGroupKey(g, fallbackIdx = 0) {
+  if (!g || typeof g !== 'object') return `group-${fallbackIdx}`;
+  const explicitId = String(g.groupId || g.id || g.poolId || g.quotaPoolId || '').trim().toLowerCase();
+  if (explicitId) return explicitId;
+  const modelKey = Array.isArray(g.models || g.modelIds)
+    ? (g.models || g.modelIds)
+        .map((m) => String(m || '').trim().toLowerCase())
+        .filter(Boolean)
+        .sort()
+        .join('+')
+    : '';
+  const bucketKey = Array.isArray(g.buckets)
+    ? g.buckets
+        .map((b) => String(b?.bucketId || '').trim().toLowerCase())
+        .filter(Boolean)
+        .sort()
+        .join('+')
+    : '';
+  const disp = String(g.displayName || g.description || '').trim().toLowerCase();
+  const parts = [disp, modelKey, bucketKey].filter(Boolean);
+  if (parts.length) return parts.join('|');
+  return `group-${fallbackIdx}`;
+}
+
+function extractSubfamilyTags(str) {
+  const s = String(str || '').toLowerCase();
+  const tags = [];
+  if (/\bcarbon\b/.test(s)) tags.push('carbon');
+  if (/\bargon\b/.test(s)) tags.push('argon');
+  if (/flash[-_\s]?lite/.test(s)) tags.push('flash-lite');
+  else if (/\bflash\b/.test(s)) tags.push('flash');
+  if (/\bopus\b/.test(s)) tags.push('opus');
+  if (/\bsonnet\b/.test(s)) tags.push('sonnet');
+  if (/\bhaiku\b/.test(s)) tags.push('haiku');
+  if (/gpt[-_\s]?oss/.test(s)) tags.push('gpt-oss');
+  if (/3\.1[-_\s]?pro/.test(s)) tags.push('3.1-pro');
+  if (/2\.5[-_\s]?pro/.test(s)) tags.push('2.5-pro');
+  return tags;
+}
+
+function resolveConfigSummaryGroup(cfg, quotaSummaryGroups = []) {
+  if (!cfg || !Array.isArray(quotaSummaryGroups) || !quotaSummaryGroups.length) return null;
+  const label = String(cfg.label || '').trim();
+  const modelId = String(cfg.modelOrAlias?.model || cfg.modelId || '').trim();
+  const strippedLabel = label.replace(/\s*\((Low|Medium|High|Thinking|Fast)\)\s*$/i, '').trim();
+  const normKey = normalizeModelId(label) || normalizeModelId(modelId);
+  const familyDisplay = (normKey && MODEL_DISPLAY_NAMES[normKey]) || strippedLabel || modelId || '';
+  const qi = cfg.quotaInfo || {};
+  const explicitPoolId = String(qi.poolId || qi.quotaPoolId || qi.groupId || cfg.quotaPoolId || '').trim().toLowerCase();
+
+  const exactModelTokens = new Set(
+    [modelId, label, strippedLabel, normKey, familyDisplay]
+      .map((x) => String(x || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const s = `${label} ${familyDisplay} ${normKey || ''} ${modelId}`.toLowerCase();
+  const cfgSubfamilies = extractSubfamilyTags(s);
+  const isGemini = /\b(?:gemini|carbon|argon|flash)\b/.test(s);
+  const isClaude = /\b(?:claude|opus|sonnet|haiku|anthropic)\b/.test(s);
+  const isGpt = /\b(?:gpt|openai|o1|o3|o4)\b/.test(s);
+
+  const scored = [];
+  for (let i = 0; i < quotaSummaryGroups.length; i++) {
+    const g = quotaSummaryGroups[i];
+    if (!g || typeof g !== 'object') continue;
+    const gPoolIds = [g.groupId, g.id, g.poolId, g.quotaPoolId]
+      .map((x) => String(x || '').trim().toLowerCase())
+      .filter(Boolean);
+    const explicitModels = Array.isArray(g.models || g.modelIds)
+      ? (g.models || g.modelIds).map((m) => String(m || '').trim().toLowerCase()).filter(Boolean)
+      : [];
+    const bucketText = Array.isArray(g.buckets)
+      ? g.buckets.map((b) => String(b?.bucketId || '')).join(' ')
+      : '';
+    const gText = `${g.displayName || ''} ${g.description || ''} ${bucketText}`.toLowerCase();
+    const gSubfamilies = extractSubfamilyTags(gText);
+
+    let score = 0;
+    if (explicitPoolId && gPoolIds.length) {
+      if (gPoolIds.includes(explicitPoolId)) {
+        score = 120;
+      }
+    } else if (explicitModels.length) {
+      if (explicitModels.some((m) => exactModelTokens.has(m))) {
+        score = 110;
+      }
+    } else if (gSubfamilies.length) {
+      if (cfgSubfamilies.length && cfgSubfamilies.some((t) => gSubfamilies.includes(t))) {
+        score = 90;
+      }
+    } else if (isGemini && /\bgemini\b/.test(gText)) {
+      score = 70;
+    } else if (isClaude && /\b(?:claude|anthropic)\b/.test(gText)) {
+      score = 70;
+    } else if (isGpt && /\b(?:gpt|openai)\b/.test(gText)) {
+      score = 70;
+    } else if ((isClaude || isGpt) && /\b(?:3p|third[-_\s]?party|partner)\b/.test(gText)) {
+      score = 50;
+    }
+
+    if (score > 0) {
+      scored.push({ g, score });
+    }
   }
-  return null;
+
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.score - a.score);
+  // Reject ambiguous ties so multiple candidate groups never pick arbitrarily by sort order
+  if (scored.length >= 2 && scored[0].score === scored[1].score) {
+    return null;
+  }
+  return scored[0].g;
 }
 
 function extractSummaryBuckets(summaryGroup) {
   if (!summaryGroup || !Array.isArray(summaryGroup.buckets)) return { fiveHour: null, weekly: null };
-  const b5h = summaryGroup.buckets.find((b) => b.window === '5h' || /5h/i.test(b.bucketId || ''));
-  const bWk = summaryGroup.buckets.find((b) => b.window === 'weekly' || /week/i.test(b.bucketId || ''));
+  const b5h = summaryGroup.buckets.find((b) => b && (b.window === '5h' || /5h/i.test(b.bucketId || '')));
+  const bWk = summaryGroup.buckets.find((b) => b && (b.window === 'weekly' || /week/i.test(b.bucketId || '')));
   const toWin = (b) => {
-    if (!b || typeof b.remainingFraction !== 'number') return null;
+    if (!b) return null;
+    const hasFrac = typeof b.remainingFraction === 'number' && Number.isFinite(b.remainingFraction);
+    const resetTime = b.resetTime || null;
+    if (!hasFrac && !resetTime) return null;
     return {
-      remainingFraction: b.remainingFraction,
-      remainingPercent: Number((b.remainingFraction * 100).toFixed(1)),
-      resetTime: b.resetTime || null,
-      resetTimeZh: formatResetTimeZh(b.resetTime)
+      remainingFraction: hasFrac ? b.remainingFraction : null,
+      remainingPercent: hasFrac ? Number((b.remainingFraction * 100).toFixed(1)) : null,
+      resetTime,
+      resetTimeZh: formatResetTimeZh(resetTime)
     };
   };
   return { fiveHour: toWin(b5h), weekly: toWin(bWk) };
 }
 
-export function groupModelQuotas(clientModelConfigs = [], quotaSummaryGroups = []) {
-  if (!Array.isArray(clientModelConfigs) || !clientModelConfigs.length) return [];
-  const pools = new Map();
-  for (const cfg of clientModelConfigs) {
+function buildQuotaPools(clientModelConfigs = [], quotaSummaryGroups = []) {
+  if (!Array.isArray(clientModelConfigs) || !clientModelConfigs.length) {
+    return { pools: [], cfgToPool: new Map() };
+  }
+  const rawPools = new Map();
+  const cfgToPoolSig = new Map();
+
+  for (let idx = 0; idx < clientModelConfigs.length; idx++) {
+    const cfg = clientModelConfigs[idx];
     const label = cfg.label || '';
     const modelId = cfg.modelOrAlias?.model || cfg.modelId || '';
-    const familyKey = normalizeModelId(label) || normalizeModelId(modelId) || label || modelId;
+    const strippedLabel = label.replace(/\s*\((Low|Medium|High|Thinking|Fast)\)\s*$/i, '').trim();
+    const normKey = normalizeModelId(label) || normalizeModelId(modelId);
+    const familyKey = normKey || strippedLabel.toLowerCase() || modelId.toLowerCase() || 'unknown';
+    const familyDisplay = (normKey && MODEL_DISPLAY_NAMES[normKey]) || strippedLabel || modelId || '未知模型';
     const qi = cfg.quotaInfo || {};
     const rem = typeof qi.remainingFraction === 'number' ? qi.remainingFraction : null;
     const resetTime = qi.resetTime || null;
-    // Group models that share the exact same resetTime & remainingFraction into unified quota pools,
-    // while preserving per-family visibility.
-    const poolSig = `${resetTime || 'none'}|${rem !== null ? rem.toFixed(4) : 'na'}`;
-    if (!pools.has(poolSig)) {
-      pools.set(poolSig, {
+    const explicitPoolId = String(qi.poolId || qi.quotaPoolId || qi.groupId || cfg.quotaPoolId || '').trim().toLowerCase();
+    const matchedGroup = resolveConfigSummaryGroup(cfg, quotaSummaryGroups);
+
+    // Group strictly by explicit pool ID or unambiguous summary group identity first; when absent,
+    // isolate by model family so unrelated groups never merge just because remainingFraction matches.
+    let poolSig;
+    if (explicitPoolId) {
+      poolSig = `pool:${explicitPoolId}`;
+    } else if (matchedGroup) {
+      poolSig = `summary:${getSummaryGroupKey(matchedGroup)}`;
+    } else {
+      poolSig = `family:${familyKey}|${resetTime || 'none'}|${rem !== null ? rem.toFixed(4) : 'na'}`;
+    }
+    cfgToPoolSig.set(idx, poolSig);
+
+    if (!rawPools.has(poolSig)) {
+      rawPools.set(poolSig, {
         id: poolSig,
         families: new Set(),
         models: [],
+        summaryGroup: matchedGroup || null,
+        summaryConflict: false,
         remainingFraction: rem,
         remainingPercent: rem !== null ? Number((rem * 100).toFixed(1)) : null,
         resetTime,
         resetTimeZh: formatResetTimeZh(resetTime)
       });
     }
-    const entry = pools.get(poolSig);
-    entry.families.add(MODEL_DISPLAY_NAMES[familyKey] || label.replace(/\s*\((Low|Medium|High)\)\s*$/i, '').trim() || familyKey);
-    entry.models.push({ label, modelId, familyKey });
+    const entry = rawPools.get(poolSig);
+    if (matchedGroup && !entry.summaryConflict) {
+      if (!entry.summaryGroup) {
+        entry.summaryGroup = matchedGroup;
+      } else if (getSummaryGroupKey(entry.summaryGroup) !== getSummaryGroupKey(matchedGroup)) {
+        entry.summaryGroup = null;
+        entry.summaryConflict = true;
+      }
+    }
+    entry.families.add(familyDisplay);
+    entry.models.push({ label, modelId, familyKey: normKey || familyKey });
   }
-  return [...pools.values()].map((p) => {
+
+  const resolvedBySig = new Map();
+  const pools = [...rawPools.values()].map((p) => {
     const fams = [...p.families];
     const poolTitle = fams.length <= 3 ? fams.join(' / ') : `${fams.slice(0, 2).join(' / ')} 等 ${fams.length} 组`;
-    const matchedGroup = matchQuotaSummaryGroup(fams.join(' '), quotaSummaryGroups);
-    const { fiveHour, weekly } = extractSummaryBuckets(matchedGroup);
-    return {
+    const { fiveHour, weekly } = extractSummaryBuckets(p.summaryGroup);
+    const has5hFrac = typeof fiveHour?.remainingFraction === 'number';
+    const poolObj = {
       id: p.id,
       title: `${poolTitle} 配额池`,
       families: fams,
       modelsCount: p.models.length,
-      remainingFraction: fiveHour ? fiveHour.remainingFraction : p.remainingFraction,
-      remainingPercent: fiveHour ? fiveHour.remainingPercent : p.remainingPercent,
-      resetTime: fiveHour ? fiveHour.resetTime : p.resetTime,
-      resetTimeZh: fiveHour ? fiveHour.resetTimeZh : p.resetTimeZh,
+      remainingFraction: has5hFrac ? fiveHour.remainingFraction : p.remainingFraction,
+      remainingPercent: has5hFrac ? fiveHour.remainingPercent : p.remainingPercent,
+      resetTime: (fiveHour?.resetTime) || p.resetTime,
+      resetTimeZh: (fiveHour?.resetTimeZh) || p.resetTimeZh,
       fiveHour,
       weekly,
       models: p.models
     };
+    resolvedBySig.set(p.id, poolObj);
+    return poolObj;
   });
+
+  const cfgToPool = new Map();
+  for (const [idx, sig] of cfgToPoolSig.entries()) {
+    const poolObj = resolvedBySig.get(sig);
+    if (poolObj) cfgToPool.set(idx, poolObj);
+  }
+  return { pools, cfgToPool };
+}
+
+export function groupModelQuotas(clientModelConfigs = [], quotaSummaryGroups = []) {
+  return buildQuotaPools(clientModelConfigs, quotaSummaryGroups).pools;
 }
 
 export function resolveModelQuota(modelNameOrKey, clientModelConfigs = [], quotaSummaryGroups = []) {
   if (!Array.isArray(clientModelConfigs) || !clientModelConfigs.length || !modelNameOrKey) return null;
   const targetLower = String(modelNameOrKey).trim().toLowerCase();
   const targetNorm = normalizeModelId(modelNameOrKey);
-  let matched = clientModelConfigs.find((c) => {
+  let matchedIdx = clientModelConfigs.findIndex((c) => {
     const lbl = String(c.label || '').toLowerCase();
     const mid = String(c.modelOrAlias?.model || c.modelId || '').toLowerCase();
     return lbl === targetLower || mid === targetLower;
   });
-  if (!matched && targetNorm) {
-    matched = clientModelConfigs.find((c) => {
+  if (matchedIdx < 0 && targetNorm) {
+    matchedIdx = clientModelConfigs.findIndex((c) => {
       const k = normalizeModelId(c.label || '') || normalizeModelId(c.modelOrAlias?.model || c.modelId || '');
       return k === targetNorm;
     });
   }
-  if (!matched) return null;
-  const qi = matched.quotaInfo || {};
-  const rem = typeof qi.remainingFraction === 'number' ? qi.remainingFraction : null;
+  if (matchedIdx < 0) {
+    const strippedTarget = targetLower.replace(/\s*\((low|medium|high|thinking|fast)\)\s*$/i, '').trim();
+    if (strippedTarget) {
+      matchedIdx = clientModelConfigs.findIndex((c) => {
+        const strippedLbl = String(c.label || '').replace(/\s*\((low|medium|high|thinking|fast)\)\s*$/i, '').trim().toLowerCase();
+        return strippedLbl && strippedLbl === strippedTarget;
+      });
+    }
+  }
+  if (matchedIdx < 0) return null;
+
+  const matched = clientModelConfigs[matchedIdx];
   const displayLabel = matched.label || formatModelDisplayName(modelNameOrKey, targetNorm);
-  const matchedGroup = matchQuotaSummaryGroup(`${displayLabel} ${targetNorm || ''}`, quotaSummaryGroups);
-  const { fiveHour, weekly } = extractSummaryBuckets(matchedGroup);
+  const { cfgToPool } = buildQuotaPools(clientModelConfigs, quotaSummaryGroups);
+  const pool = cfgToPool.get(matchedIdx);
+  if (!pool) return null;
+
   return {
     label: displayLabel,
     modelKey: targetNorm,
-    remainingFraction: fiveHour ? fiveHour.remainingFraction : rem,
-    remainingPercent: fiveHour ? fiveHour.remainingPercent : (rem !== null ? Number((rem * 100).toFixed(1)) : null),
-    resetTime: fiveHour ? fiveHour.resetTime : (qi.resetTime || null),
-    resetTimeZh: fiveHour ? fiveHour.resetTimeZh : formatResetTimeZh(qi.resetTime),
-    fiveHour,
-    weekly
+    poolId: pool.id,
+    remainingFraction: pool.remainingFraction,
+    remainingPercent: pool.remainingPercent,
+    resetTime: pool.resetTime,
+    resetTimeZh: pool.resetTimeZh,
+    fiveHour: pool.fiveHour,
+    weekly: pool.weekly
   };
 }
 
 export function classifyRequestError(rawInput, options = {}) {
   const error = typeof rawInput === 'string' ? rawInput : String(rawInput?.error || rawInput?.message || '');
   const currentModel = options.currentModel || '';
-  const modelQuota = resolveModelQuota(currentModel, options.clientModelConfigs || []);
+  const modelQuota = resolveModelQuota(currentModel, options.clientModelConfigs || [], options.quotaSummaryGroups || []);
 
   if (!error) {
     return {
@@ -336,7 +500,12 @@ export function classifyRequestError(rawInput, options = {}) {
   }
 
   const explicitQuota = /(?:quota\s*(?:exceeded|reached|limit|exhausted)|out\s+of\s+quota|exhausted.*(?:capacity|quota)|resource_exhausted.*(?:quota|capacity|billing)|free\s+tier\s+quota|daily\s+quota|weekly\s+quota)/i.test(error);
-  const quotaZero = Boolean(modelQuota && typeof modelQuota.remainingFraction === 'number' && modelQuota.remainingFraction <= 0.0001);
+  const quotaZero = Boolean(
+    modelQuota && (
+      (typeof modelQuota.remainingFraction === 'number' && modelQuota.remainingFraction <= 0.0001) ||
+      (typeof modelQuota.weekly?.remainingFraction === 'number' && modelQuota.weekly.remainingFraction <= 0.0001)
+    )
+  );
   if (explicitQuota || quotaZero) {
     return {
       kind: 'quota_exhausted',
@@ -649,18 +818,23 @@ export function summarizeApiCost(requests = [], dynamicModelMap = null) {
       unpricedOutputTokens += outp;
       if (!calc.rawModel) unpricedReasons.missingModel++;
       else unpricedReasons.unsupportedModel++;
-      const unknownKey = calc.modelKey || 'unidentified';
+      const cleanRawDisp = calc.rawModel ? formatModelDisplayName(calc.rawModel, calc.modelKey) : '';
+      const unknownKey = calc.modelKey
+        || (cleanRawDisp ? `unpriced:${cleanRawDisp.toLowerCase()}` : 'unidentified');
       if (!byModel[unknownKey]) {
         byModel[unknownKey] = {
           modelKey: unknownKey,
-          displayName: calc.modelKey ? (MODEL_DISPLAY_NAMES[calc.modelKey] || calc.modelKey) : '未记录模型归档请求',
+          displayName: calc.modelKey
+            ? (MODEL_DISPLAY_NAMES[calc.modelKey] || calc.modelKey)
+            : (cleanRawDisp || '未记录模型归档请求'),
           requests: 0,
           tokens: 0,
           inputTokens: 0,
           cacheTokens: 0,
           outputTokens: 0,
           costUSD: 0,
-          unpriced: true
+          unpriced: true,
+          missingModel: !calc.rawModel
         };
       }
       const m = byModel[unknownKey];

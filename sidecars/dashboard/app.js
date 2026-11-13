@@ -349,11 +349,28 @@
   // Sidecar API Client
   // -------------------------------------------------------------------------
 
+  function getCsrfToken() {
+    const el = typeof document !== 'undefined' ? document.querySelector('meta[name="cv-csrf-token"]') : null;
+    return el ? (el.getAttribute('content') || '') : '';
+  }
+
   async function apiFetch(path, options = {}) {
-    const method = options.method || 'GET';
+    const method = String(options.method || 'GET').toUpperCase();
     const headers = { ...(options.headers || {}) };
     let body = options.body;
-    if (body && typeof body === 'object') {
+    if (method !== 'GET' && method !== 'HEAD') {
+      const csrfToken = getCsrfToken();
+      if (csrfToken && !headers['X-CV-Token']) {
+        headers['X-CV-Token'] = csrfToken;
+      }
+      if (body === undefined) {
+        headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+        body = '{}';
+      } else if (body && typeof body === 'object') {
+        headers['Content-Type'] = 'application/json';
+        body = JSON.stringify(body);
+      }
+    } else if (body && typeof body === 'object') {
       headers['Content-Type'] = 'application/json';
       body = JSON.stringify(body);
     }
@@ -452,13 +469,40 @@
   // Top Capsules & Conversation Switcher
   // -------------------------------------------------------------------------
 
+  function isKnownPct(val) {
+    return typeof val === 'number' && Number.isFinite(val);
+  }
+
+  function fmtSyncClock(isoStr) {
+    if (!isoStr) return '';
+    const dt = new Date(isoStr);
+    if (Number.isNaN(dt.getTime())) return '';
+    const now = new Date();
+    const hh = String(dt.getHours()).padStart(2, '0');
+    const mm = String(dt.getMinutes()).padStart(2, '0');
+    const sameDay = dt.getFullYear() === now.getFullYear() &&
+      dt.getMonth() === now.getMonth() &&
+      dt.getDate() === now.getDate();
+    if (sameDay) return `${hh}:${mm}`;
+    const mo = String(dt.getMonth() + 1).padStart(2, '0');
+    const da = String(dt.getDate()).padStart(2, '0');
+    return `${mo}-${da} ${hh}:${mm}`;
+  }
+
   function computeEffectiveWindow(ctx = {}) {
-    const serverBudget = Number(ctx.budget || 256000);
-    const budget = state.ui.budgetOverride > 0 ? state.ui.budgetOverride : serverBudget;
-    const used = typeof ctx.used === 'number' ? ctx.used : null;
-    const pct = used !== null && budget > 0 ? Number(((used / budget) * 100).toFixed(1)) : null;
-    const remaining = used !== null && budget > 0 ? Math.max(0, budget - used) : null;
-    return { budget, serverBudget, used, pct, remaining, isOverridden: state.ui.budgetOverride > 0 };
+    const rawServerBudget = Number(ctx?.budget);
+    const serverBudget = Number.isFinite(rawServerBudget) && rawServerBudget > 0 ? rawServerBudget : null;
+    const isOverridden = Number(state.ui.budgetOverride) > 0;
+    const budget = isOverridden ? Number(state.ui.budgetOverride) : serverBudget;
+    const budgetSource = isOverridden ? 'user' : (serverBudget ? (ctx?.budgetSource || 'server') : 'unknown');
+    const used = typeof ctx?.used === 'number' && Number.isFinite(ctx.used) ? ctx.used : null;
+    const pct = used !== null && budget !== null && budget > 0
+      ? Number(((used / budget) * 100).toFixed(1))
+      : null;
+    const remaining = used !== null && budget !== null && budget > 0
+      ? Math.max(0, budget - used)
+      : null;
+    return { budget, serverBudget, budgetSource, used, pct, remaining, isOverridden };
   }
 
   function renderTopCapsules() {
@@ -468,7 +512,7 @@
 
     const win = computeEffectiveWindow(ctx);
     const pct = win.pct;
-    setText('cap-ctx-pct', pct !== null ? `${pct.toFixed(0)}%` : '--%');
+    setText('cap-ctx-pct', pct !== null ? `${pct.toFixed(0)}%` : (win.used !== null ? fmtTokens(win.used) : '--%'));
 
     const miniRing = $('mini-ring-fill');
     if (miniRing) {
@@ -554,9 +598,15 @@
       if (err.kind && err.kind !== 'none') {
         cls = err.kind === 'canceled' ? 'neutral' : 'danger';
         label = err.badgeText || err.title || '异常';
-      } else if (pct === null) {
+      } else if (win.used === null) {
         cls = 'neutral';
         label = '待首轮请求';
+      } else if (pct === null) {
+        cls = 'neutral';
+        label = '容量未知';
+      } else if (win.isOverridden && !win.serverBudget) {
+        cls = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : 'neutral';
+        label = pct >= 90 ? '近对比基准' : pct >= 75 ? '超对比 75%' : '按对比基准';
       } else if (pct >= 90) {
         cls = 'danger';
         label = '临近上限';
@@ -571,7 +621,10 @@
     // Hero circular gauge (r = 35 => C = 219.91)
     const circum = 219.91;
     setText('ctx-pct-big', pct !== null ? `${pct.toFixed(1)}%` : '--%');
-    setText('ctx-gauge-sub', win.isOverridden ? `按 ${fmtTokens(win.budget, 0)} 基准` : '预算占比');
+    setText(
+      'ctx-gauge-sub',
+      win.isOverridden ? `按 ${fmtTokens(win.budget, 0)} 基准` : (win.budget ? '预算占比' : '上限未知')
+    );
 
     const heroFill = $('hero-ring-fill');
     const heroCache = $('hero-ring-cache');
@@ -581,7 +634,7 @@
       heroFill.style.stroke = resolveHealthStroke(pct, err.kind);
     }
     if (heroCache) {
-      const cacheRatio = win.budget > 0 && ctx.cacheTokens
+      const cacheRatio = win.budget && win.budget > 0 && ctx.cacheTokens
         ? Math.min(1, Math.max(0, ctx.cacheTokens / win.budget))
         : 0;
       heroCache.setAttribute('stroke-dasharray', `${(cacheRatio * circum).toFixed(2)} ${circum}`);
@@ -599,14 +652,19 @@
       setText('ctx-used-sub', `本地归档约 ${fmtTokens(audit.localTotal?.low || 0, 1)}~${fmtTokens(audit.localTotal?.high || 0, 1)}`);
     }
 
-    setText('ctx-budget', fmtTokens(win.budget));
-    setText('ctx-budget-sub', win.isOverridden ? `服务端默认 ${fmtTokens(win.serverBudget, 0)}` : '自动压缩阈值');
+    setText('ctx-budget', win.budget ? fmtTokens(win.budget) : '未知');
+    setText(
+      'ctx-budget-sub',
+      win.isOverridden
+        ? (win.serverBudget ? `服务端默认 ${fmtTokens(win.serverBudget, 0)}` : '用户对比基准（非服务端阈值）')
+        : (win.budget ? '自动压缩阈值' : '归档未记录窗口容量')
+    );
     setText('ctx-rem', win.remaining !== null ? fmtTokens(win.remaining) : '--');
     setText(
       'ctx-rem-sub',
       win.remaining !== null && win.budget > 0
-        ? `剩余 ${Math.max(0, 100 - (pct || 0)).toFixed(1)}% 空间`
-        : '等待服务端统计'
+        ? `${win.isOverridden ? '距基准余 ' : '剩余 '}${Math.max(0, 100 - (pct || 0)).toFixed(1)}% 空间`
+        : (win.used !== null ? '需窗口上限方可计算' : '等待服务端统计')
     );
 
     setText('ctx-cache-rate', ctx.cacheHitPercent !== null ? `${ctx.cacheHitPercent.toFixed(1)}%` : '--');
@@ -634,8 +692,20 @@
       if (err.kind && err.kind !== 'none') {
         if (err.kind !== 'canceled') takeaway.classList.add('danger');
         setText(takeaway, `${err.title}：${err.detail}`);
-      } else if (pct === null) {
+      } else if (win.used === null) {
         setText(takeaway, `当前会话（${snap.conversationTitle}）暂无已完成模型轮次；发送消息后自动同步精确窗口占用。`);
+      } else if (pct === null) {
+        setText(
+          takeaway,
+          `当前会话已用 ${fmtTokens(win.used)} Token；本地归档未记录该模型窗口容量上限，暂不推导健康百分比（可在上方选择 200K / 256K / 1M 作为对比基准）。`
+        );
+      } else if (win.isOverridden && !win.serverBudget) {
+        if (pct >= 88) takeaway.classList.add('danger');
+        else if (pct >= 72) takeaway.classList.add('warn');
+        setText(
+          takeaway,
+          `当前会话已用 ${fmtTokens(win.used)} Token，按所选 ${fmtTokens(win.budget, 0)} 对比基准折算为 ${pct.toFixed(1)}%（剩余 ${fmtTokens(win.remaining)}，非服务端压缩阈值）。`
+        );
       } else if (pct >= 88) {
         takeaway.classList.add('danger');
         setText(takeaway, `当前窗口已使用 ${pct.toFixed(1)}%，接近上限阈值，建议适时执行 /compact 或拆分新会话以保持响应速度。`);
@@ -661,7 +731,7 @@
     );
 
     // Card 2: Speed & Latency
-    renderSpeedCard(spd, ctx, snap.sparkline || []);
+    renderSpeedCard(spd, ctx, snap.sparkline || [], snap.quotaStatus || null);
 
     // Card 2.5: Per-Turn Timeline
     renderTurnsTimelineCard(snap.turns || [], audit.turnsCount || 0);
@@ -723,7 +793,7 @@
     }
   }
 
-  function renderSpeedCard(spd, ctx, sparkline) {
+  function renderSpeedCard(spd, ctx, sparkline, quotaStatus = null) {
     setText('speed-source-tag', spd?.isServerExact ? '服务端精确计时' : '归档时间戳估算');
     setText(
       'sp-avg-peak-chip',
@@ -778,26 +848,53 @@
     const qBox = $('ctx-quota-box');
     const q = ctx.quota;
     if (qBox) {
-      if (q && typeof q.remainingPercent === 'number') {
+      if (q) {
         qBox.classList.remove('hidden');
-        setText('ctx-quota-title', `${q.label} 配额余量`);
-        if (q.weekly && typeof q.weekly.remainingPercent === 'number') {
-          setText('ctx-quota-val', `5h ${q.remainingPercent.toFixed(1)}% · 周 ${q.weekly.remainingPercent.toFixed(1)}%`);
+        const syncTime = fmtSyncClock(quotaStatus?.lastSuccessAt);
+        const staleTag = quotaStatus?.stale
+          ? `（缓存${syncTime ? ` · ${syncTime}` : ''}）`
+          : (quotaStatus?.summaryStale ? '（摘要降级）' : '');
+        setText('ctx-quota-title', `${q.label || '当前模型'} 配额余量${staleTag}`);
+
+        const p5 = isKnownPct(q.fiveHour?.remainingPercent)
+          ? q.fiveHour.remainingPercent
+          : (!q.fiveHour && isKnownPct(q.remainingPercent) ? q.remainingPercent : null);
+        const pW = isKnownPct(q.weekly?.remainingPercent) ? q.weekly.remainingPercent : null;
+        const r5 = q.fiveHour?.resetTimeZh || (!q.fiveHour ? q.resetTimeZh : '') || '';
+        const rW = q.weekly?.resetTimeZh || '';
+        const rAny = r5 || rW || q.resetTimeZh || '';
+
+        let valText = '';
+        let barPct = null;
+        if (p5 !== null && pW !== null) {
+          valText = `5h ${p5.toFixed(1)}% · 周 ${pW.toFixed(1)}%`;
+          barPct = Math.min(p5, pW);
+        } else if (p5 !== null) {
+          const prefix5h = q.fiveHour ? '5h ' : '';
+          valText = `${prefix5h}${p5.toFixed(1)}%${r5 ? ` · ${r5}重置` : ''}`;
+          barPct = p5;
+        } else if (pW !== null) {
+          valText = `周 ${pW.toFixed(1)}%${rW ? ` · ${rW}重置` : ''}`;
+          barPct = pW;
         } else {
-          const resetNote = q.resetTimeZh ? ` · ${q.resetTimeZh}重置` : '';
-          setText('ctx-quota-val', `${q.remainingPercent.toFixed(1)}%${resetNote}`);
+          valText = `余量未知${rAny ? ` · ${rAny}重置` : ''}`;
+          barPct = null;
         }
-        const barPct = q.weekly && typeof q.weekly.remainingPercent === 'number'
-          ? Math.min(q.remainingPercent, q.weekly.remainingPercent)
-          : q.remainingPercent;
+        setText('ctx-quota-val', valText);
+
         const bar = $('ctx-quota-bar');
         if (bar) {
-          bar.style.width = `${Math.min(100, Math.max(0, barPct))}%`;
-          bar.style.background = barPct <= 15
-            ? 'var(--danger)'
-            : barPct <= 40
-              ? 'var(--warn)'
-              : 'var(--good)';
+          if (barPct !== null) {
+            bar.style.width = `${Math.min(100, Math.max(0, barPct))}%`;
+            bar.style.background = barPct <= 15
+              ? 'var(--danger)'
+              : barPct <= 40
+                ? 'var(--warn)'
+                : 'var(--good)';
+          } else {
+            bar.style.width = '0%';
+            bar.style.background = 'var(--cv-muted)';
+          }
         }
       } else {
         qBox.classList.add('hidden');
@@ -1102,6 +1199,17 @@
     return `${y}-${m}-${d}`;
   }
 
+  function computeHeatmapDateWindow(todayKey, pageOffset = 0) {
+    const today = parseLocalDate(todayKey);
+    const offset = Math.max(0, Number(pageOffset) || 0);
+    const endSat = new Date(today);
+    endSat.setDate(endSat.getDate() + (6 - endSat.getDay()) - offset * 53 * 7);
+    const startSun = new Date(endSat);
+    startSun.setDate(startSun.getDate() - (53 * 7 - 1));
+    const displayEnd = endSat > today ? new Date(today) : new Date(endSat);
+    return { today, startSun, endSat, displayEnd };
+  }
+
   function computeQuantileThresholds(values) {
     const nonZero = values.filter((v) => v > 0).sort((a, b) => a - b);
     if (!nonZero.length) return [1, 2, 3];
@@ -1154,21 +1262,12 @@
     const stage = $('chart-stage');
     if (!stage) return;
 
-    const today = parseLocalDate(hist.todayKey);
-    const endAnchor = new Date(today);
-    endAnchor.setDate(endAnchor.getDate() - state.heatPageOffset * 364);
-
-    // Align end Saturday & start Sunday (53 columns = 371 days covering full 52 weeks)
-    const endSat = new Date(endAnchor);
-    endSat.setDate(endSat.getDate() + (6 - endSat.getDay()));
-    const startSun = new Date(endSat);
-    startSun.setDate(startSun.getDate() - 52 * 7 + 1); // Wait: 52*7 - 1 = 363 days (52 weeks * 7 days = 364 days)
-    startSun.setDate(endSat.getDate() - (53 * 7 - 1));
+    const { today, startSun, displayEnd } = computeHeatmapDateWindow(hist.todayKey, state.heatPageOffset);
 
     const firstDate = parseLocalDate(hist.firstUseDate || hist.todayKey);
     if ($('btn-heat-prev')) $('btn-heat-prev').disabled = startSun <= firstDate && state.heatPageOffset >= 3;
     if ($('btn-heat-next')) $('btn-heat-next').disabled = state.heatPageOffset <= 0;
-    setText('heat-range-label', `${toYmd(startSun)} 至 ${toYmd(endAnchor)}`);
+    setText('heat-range-label', `${toYmd(startSun)} 至 ${toYmd(displayEnd)}`);
 
     const windowValues = [];
     const weeks = [];
@@ -1637,6 +1736,16 @@
     if (plan.validUntil) planRows.push(['权益到期日', plan.validUntil]);
     if (plan.note) planRows.push(['本地备注', plan.note]);
 
+    const quotaStatus = hist.quotaStatus || null;
+    if (quotaStatus?.stale) {
+      const tStr = fmtSyncClock(quotaStatus.lastSuccessAt);
+      planRows.push(['配额同步状态', `语言服务暂不可达，展示上次缓存${tStr ? `（${tStr}）` : ''}`]);
+    } else if (quotaStatus?.summaryStale) {
+      planRows.push(['配额同步状态', '多窗口配额摘要暂不可用，仅展示基础池']);
+    } else if (quotaStatus?.state === 'error') {
+      planRows.push(['配额同步状态', '语言服务请求失败，暂未获取到配额池']);
+    }
+
     const planKv = $('plan-kv');
     if (planKv) {
       planKv.innerHTML = planRows.map(([k, v]) =>
@@ -1647,12 +1756,49 @@
     // Live Model Quota Pools (5h burst window + Weekly tier/family shared pool)
     const qWrap = $('quota-pools-wrap');
     const qList = $('quota-pools-list');
+    const qSyncPill = $('quota-sync-pill');
+    if (qSyncPill) {
+      if (quotaStatus?.stale) {
+        const tStr = fmtSyncClock(quotaStatus.lastSuccessAt);
+        qSyncPill.className = 'status-pill warn';
+        setText(qSyncPill, `缓存快照${tStr ? ` · ${tStr}` : ''}`);
+      } else if (quotaStatus?.summaryStale) {
+        qSyncPill.className = 'status-pill warn';
+        setText(qSyncPill, '摘要降级');
+      } else if (quotaStatus?.state === 'error') {
+        qSyncPill.className = 'status-pill danger';
+        setText(qSyncPill, '连接失败');
+      } else {
+        qSyncPill.className = 'status-pill warn hidden';
+        setText(qSyncPill, '');
+      }
+    }
+
     if (qWrap && qList) {
       if (quotas.length > 0) {
         const barColor = (p) => (p <= 15 ? 'var(--danger)' : p <= 40 ? 'var(--warn)' : 'var(--good)');
+        const renderQuotaWinBlock = (winTitle, pctVal, resetZh, defaultResetText) => {
+          if (isKnownPct(pctVal)) {
+            const rStr = resetZh ? `${resetZh} 重置` : defaultResetText;
+            const w = Math.min(100, Math.max(0, pctVal));
+            return (
+              `<div class="quota-win-block">` +
+              `<div class="quota-inline-sub"><span>${escZh(winTitle)}</span><span class="num-strong">${escZh(`${pctVal.toFixed(1)}% · ${rStr}`)}</span></div>` +
+              `<div class="thin-track"><div class="thin-fill" style="width:${w}%;background:${barColor(pctVal)}"></div></div>` +
+              `</div>`
+            );
+          }
+          const unknownLabel = resetZh ? `余量未知 · ${resetZh} 重置` : '余量未知';
+          return (
+            `<div class="quota-win-block">` +
+            `<div class="quota-inline-sub"><span>${escZh(winTitle)}</span><span class="muted num">${escZh(unknownLabel)}</span></div>` +
+            `<div class="thin-track"><div class="thin-fill" style="width:0%;background:var(--cv-muted)"></div></div>` +
+            `</div>`
+          );
+        };
+
         qWrap.classList.remove('hidden');
         qList.innerHTML = quotas.map((pool) => {
-          const pct = pool.remainingPercent ?? 100;
           const modelLabels = (pool.models || [])
             .map((m) => (typeof m === 'string' ? m : (m?.label || m?.modelId || '')))
             .filter(Boolean);
@@ -1665,40 +1811,45 @@
           const variantCount = pool.modelsCount || modelLabels.length;
           const hoverDetail = modelLabels.length ? `包含档位：${modelLabels.join('、')}` : label;
 
-          if (pool.fiveHour && pool.weekly) {
-            const p5 = pool.fiveHour.remainingPercent ?? pct;
-            const pW = pool.weekly.remainingPercent ?? 100;
-            const r5 = pool.fiveHour.resetTimeZh ? `${pool.fiveHour.resetTimeZh} 重置` : '5h 滚动重置';
-            const rW = pool.weekly.resetTimeZh ? `${pool.weekly.resetTimeZh} 重置` : '按周重置';
+          if (pool.fiveHour || pool.weekly) {
+            const winBlocks = [];
+            if (pool.fiveHour) {
+              winBlocks.push(renderQuotaWinBlock('5 小时滚动限额', pool.fiveHour.remainingPercent, pool.fiveHour.resetTimeZh, '5h 滚动重置'));
+            } else if (isKnownPct(pool.remainingPercent)) {
+              winBlocks.push(renderQuotaWinBlock('基础配额窗口', pool.remainingPercent, pool.resetTimeZh, '自动周期重置'));
+            }
+            if (pool.weekly) {
+              winBlocks.push(renderQuotaWinBlock('Week 周度总额度（档位共享池）', pool.weekly.remainingPercent, pool.weekly.resetTimeZh, '按周重置'));
+            }
             return (
               `<div class="quota-inline" title="${escZh(hoverDetail)}">` +
               `<div class="quota-inline-head">` +
               `<span class="quota-name">${escZh(label)}</span>` +
               `<span class="quota-tag">${escZh(`共 ${variantCount} 档`)}</span>` +
               `</div>` +
-              `<div class="quota-win-block">` +
-              `<div class="quota-inline-sub"><span>${escZh('5 小时滚动限额')}</span><span class="num-strong">${escZh(`${p5.toFixed(1)}% · ${r5}`)}</span></div>` +
-              `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, p5))}%;background:${barColor(p5)}"></div></div>` +
-              `</div>` +
-              `<div class="quota-win-block">` +
-              `<div class="quota-inline-sub"><span>${escZh('Week 周度总额度（档位共享池）')}</span><span class="num-strong">${escZh(`${pW.toFixed(1)}% · ${rW}`)}</span></div>` +
-              `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, pW))}%;background:${barColor(pW)}"></div></div>` +
-              `</div>` +
+              winBlocks.join('') +
               `</div>`
             );
           }
 
+          const hasPct = isKnownPct(pool.remainingPercent);
+          const pctVal = hasPct ? pool.remainingPercent : null;
           const subLeft = variantCount > families.length
             ? `共享配额池 · 含 ${variantCount} 个模型档位`
             : `共享配额池 · ${variantCount || families.length} 个模型`;
-          const resetStr = pool.resetTimeZh ? `${pool.resetTimeZh} 重置` : '自动周期重置';
+          const resetStr = pool.resetTimeZh
+            ? `${pool.resetTimeZh} 重置`
+            : (hasPct ? '自动周期重置' : '服务端未返回余量百分比');
+          const fillStyle = hasPct
+            ? `width:${Math.min(100, Math.max(0, pctVal))}%;background:${barColor(pctVal)}`
+            : 'width:0%;background:var(--cv-muted)';
           return (
             `<div class="quota-inline" title="${escZh(hoverDetail)}">` +
             `<div class="quota-inline-head">` +
             `<span class="quota-name">${escZh(label)}</span>` +
-            `<span class="num-strong quota-val">${escZh(`${pct.toFixed(1)}%`)}</span>` +
+            `<span class="${hasPct ? 'num-strong' : 'muted num'} quota-val">${escZh(hasPct ? `${pctVal.toFixed(1)}%` : '余量未知')}</span>` +
             `</div>` +
-            `<div class="thin-track"><div class="thin-fill" style="width:${Math.min(100, Math.max(0, pct))}%;background:${barColor(pct)}"></div></div>` +
+            `<div class="thin-track"><div class="thin-fill" style="${fillStyle}"></div></div>` +
             `<div class="quota-inline-sub">` +
             `<span>${escZh(subLeft)}</span>` +
             `<span class="num">${escZh(resetStr)}</span>` +
@@ -1706,6 +1857,9 @@
             `</div>`
           );
         }).join('');
+      } else if (quotaStatus?.state === 'error') {
+        qWrap.classList.remove('hidden');
+        qList.innerHTML = `<div class="kv-row"><span class="muted">${escZh('宿主语言服务暂不可达，尚未获取到模型配额池数据')}</span></div>`;
       } else {
         qWrap.classList.add('hidden');
       }
@@ -1824,7 +1978,7 @@
         board.innerHTML = models.map((m) => {
           const wPct = Math.max(2, ((m.tokens || 0) / maxModelTok) * 100).toFixed(1);
           const costLabel = m.unpriced
-            ? `未记模型（混合模式下按基准折算）`
+            ? (m.missingModel ? '未记模型（混合模式下按基准折算）' : '未收录单价（混合模式下按基准折算）')
             : `${fmtUSD(m.costUSD)}（${fmtCNY(m.costUSD)}）`;
           return (
             `<div class="model-row">` +
@@ -1982,9 +2136,10 @@
       if (window.__CV_FLOAT_MODE__) {
         if (ev.shiftKey || window.__CV_BROWSER_FALLBACK__) {
           if (window.sidecar?.closeFloatWindow) {
-            window.sidecar.closeFloatWindow();
+            await window.sidecar.closeFloatWindow();
           } else {
             await apiFetch('/api/float-window', { method: 'POST', body: { action: 'close' } }).catch(() => {});
+            try { window.close(); } catch {}
           }
           return;
         }

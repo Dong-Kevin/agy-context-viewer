@@ -13,10 +13,15 @@ import { fileURLToPath } from 'node:url';
 
 import {
   collectTokenHistory,
+  createLoopbackSessionToken,
   getMenubarMode,
   getSettings,
   getSidebarEntryStatus,
+  guardLoopbackRequest,
+  injectCsrfMeta,
   launchCliTerminal,
+  LOOPBACK_SECURITY_HEADERS,
+  readLoopbackJsonBody,
   saveSettings,
   scanConversation,
   setSidebarEntrypoint,
@@ -203,18 +208,27 @@ async function startOfficialSidecar() {
 async function startStandaloneServer() {
   const portIdx = process.argv.indexOf('--port');
   const port = portIdx >= 0 ? Number(process.argv[portIdx + 1] || 18970) : 18970;
+  const sessionToken = createLoopbackSessionToken();
   const h = createHandlers(
     () => process.env.ANTIGRAVITY_CONVERSATION_ID || '',
     (body, opts) => ({ __rawResponse: true, body, ...opts })
   );
 
+  const serveStandaloneHtml = async () => ({
+    __rawResponse: true,
+    body: injectCsrfMeta(readFileSync(join(__dirname, 'index.html'), 'utf-8'), sessionToken),
+    contentType: 'text/html; charset=utf-8',
+    headers: NO_CACHE_HEADERS
+  });
+
   const routes = new Map([
-    ['GET:/', async () => h.indexHtml()],
-    ['GET:/sidebar', async () => h.indexHtml()],
+    ['GET:/', serveStandaloneHtml],
+    ['GET:/sidebar', serveStandaloneHtml],
     ['GET:/preload.js', async () => ({
       __rawResponse: true,
       body: 'window.sidecar = window.sidecar || { conversationId: new URLSearchParams(location.search).get("conversationId") || "", fetch: (u, o) => fetch(u, o), getWorkspaceUris: async () => [], onWorkspaceChange: () => () => {} };',
-      contentType: 'application/javascript; charset=utf-8'
+      contentType: 'application/javascript; charset=utf-8',
+      headers: NO_CACHE_HEADERS
     })],
     ['GET:/styles.css', async () => h.staticAsset('styles.css', 'text/css; charset=utf-8')()],
     ['GET:/app.js', async () => h.staticAsset('app.js', 'application/javascript; charset=utf-8')()],
@@ -229,41 +243,60 @@ async function startStandaloneServer() {
     ['POST:/api/entrypoints', h.apiEntrypointsControl]
   ]);
 
-  const server = createServer((req, res) => {
-    const url = new URL(req.url, `http://127.0.0.1:${port}`);
-    const handler = routes.get(`${req.method}:${url.pathname}`);
-    if (!handler) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found' }));
-      return;
-    }
+  const server = createServer(async (req, res) => {
+    try {
+      const activePort = server.address()?.port || port;
+      const guard = guardLoopbackRequest(req, res, { port: activePort, token: sessionToken });
+      if (!guard.ok) return;
 
-    let body = '';
-    req.on('data', (c) => {
-      if (body.length < 1024 * 1024) body += c;
-    });
-    req.on('end', async () => {
-      try {
-        const data = Object.fromEntries(url.searchParams.entries());
-        if (body && req.method === 'POST') {
-          Object.assign(data, JSON.parse(body));
-        }
-        const out = await handler(data);
-        if (out?.__rawResponse) {
-          res.writeHead(out.status || 200, {
-            'Content-Type': out.contentType || 'text/plain',
-            ...(out.headers || {})
-          });
-          res.end(out.body);
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(out));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: false, error: err.message }));
+      const lookupMethod = guard.method === 'HEAD' ? 'GET' : guard.method;
+      const handler = routes.get(`${lookupMethod}:${guard.url.pathname}`);
+      if (!handler) {
+        res.writeHead(404, {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...NO_CACHE_HEADERS,
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+        res.end(guard.method === 'HEAD' ? undefined : JSON.stringify({ ok: false, error: 'Not found' }));
+        return;
       }
-    });
+
+      const data = Object.fromEntries(guard.url.searchParams.entries());
+      if (guard.method === 'POST') {
+        const postBody = await readLoopbackJsonBody(req);
+        Object.assign(data, postBody);
+      }
+
+      const out = await handler(data);
+      if (out?.__rawResponse) {
+        res.writeHead(out.status || 200, {
+          'Content-Type': out.contentType || 'text/plain; charset=utf-8',
+          ...(out.headers || {}),
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+        res.end(guard.method === 'HEAD' ? undefined : out.body);
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        ...NO_CACHE_HEADERS,
+        ...LOOPBACK_SECURITY_HEADERS
+      });
+      res.end(guard.method === 'HEAD' ? undefined : JSON.stringify(out));
+    } catch (err) {
+      const status = Number.isInteger(err?.status) ? err.status : 500;
+      if (!res.headersSent) {
+        res.writeHead(status, {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...NO_CACHE_HEADERS,
+          ...LOOPBACK_SECURITY_HEADERS
+        });
+      }
+      if (!res.writableEnded) {
+        res.end(JSON.stringify({ ok: false, error: err?.message || 'Internal server error' }));
+      }
+    }
   });
 
   const shouldOpen = process.argv.includes('--open');

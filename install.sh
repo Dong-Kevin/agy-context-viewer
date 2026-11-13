@@ -133,7 +133,11 @@ mv -f "${TARGET_DIR}/sidecars/dashboard/.sidecar.json.tmp" "${TARGET_DIR}/sideca
 # Sync user's saved manifest & launch persistent macOS Menu Bar indicator if enabled
 node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" --sync-manifest >/dev/null 2>&1 || true
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" --ensure-menubar >/dev/null 2>&1 || true
+  if /usr/bin/swiftc -version >/dev/null 2>&1; then
+    node "${TARGET_DIR}/sidecars/dashboard/cli.mjs" --ensure-menubar >/dev/null 2>&1 || true
+  else
+    warn "未检测到可用的 Swift 编译器（Xcode Command Line Tools），macOS 原生菜单栏与置顶小窗暂未启用；可运行 xcode-select --install 后执行 agy-context menubar on 开启（宿主侧边栏与终端看板不受影响）。"
+  fi
 fi
 
 # 4. Install `agy-context` CLI wrapper into ~/.local/bin for terminal / agy CLI users

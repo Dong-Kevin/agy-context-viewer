@@ -2,7 +2,53 @@
 
 ## 当前阶段
 
-`v1.6.2` 已完成开发、隐私脱敏与双语文档升级（修复「费用与订阅」页 Google AI Ultra 档位与参考价识别、接入 `RetrieveUserQuotaSummary` 的 `5h + Week` 双维度共享额度池、修复模型配额池 `[object Object]` 序列化，并新增脱敏界面预览图库、中英文双语 README 与先行开源项目致谢）。
+本地未提交版本为 `v1.6.3`。[第四轮审查](docs/CODEX_REVIEW_2026-11-12_FOURTH.md) 确认 T1–T3 原始复现路径已修复，现有回归通过；组合测试仍确认 U1–U3 三项 P2，尚未修复。之前的本机安装记录保留于下方，第四轮没有重新安装。`git add / commit / tag / push` 与 GitHub Release 发布仍待明确授权。
+
+## 第四轮审查结果（2026-11-12 23:23 北京时间）
+
+- [x] 完成 [第四轮报告](docs/CODEX_REVIEW_2026-11-12_FOURTH.md)，复核 T1–T3 并通过隔离探针确认组合边界。
+- [ ] **U1（P2）**：已有服务端容量时，手动对比基准会掩盖真实容量告警；真实 95% 可显示为 19% 且“运行健康”。
+- [ ] **U2（P2）**：切换至新模型后仍沿用上一模型的服务端容量，当前百分比归属错误。
+- [ ] **U3（P2）**：基础配额已知、摘要仅含重置时间时，网页 / 菜单栏隐藏了已知余量。
+- **下一步建议**：进入修复后先解决 U1–U3，并将报告中的交叉用例补入现有回归。本轮仅审查与文档更新，未实施业务修复。
+- **验证**：现有 `verify.mjs` 6 / 6 阶段通过（36 个源码文件），打包、SHA-256 / CRC、Shell 语法及差异检查通过；U1–U3 的额外探针复现成立。Windows / Linux 桌面及 Node.js 18 仍未实测。
+
+## 第三轮审查修复与验收记录（2026-11-12 23:03 北京时间）
+
+- [x] **T1（P2）未知配额与单窗口 `weekly` 配额展示修正**：在 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 的 `extractSummaryBuckets` 中保留仅含 `resetTime` 的窗口结构并将缺失 `remainingFraction` 维持为 `null`（不把 `weekly` 混入顶层 `5h` 字段）；在 [app.js](./sidecars/dashboard/app.js)、[float_window.mjs](./sidecars/dashboard/float_window.mjs) 与 [cli.mjs](./sidecars/dashboard/cli.mjs) 移除 `remainingPercent ?? 100` 假值兜底，支持 `5h + weekly`、仅 `5h`、仅 `weekly`（独立展示 `Week 20.0%`）、仅 `resetTime`（显示「余量未知 · 重置时间」且进度条归零）、全缺失（显示「余量未知」/`--%`）与真实 `0%`（显示 `0.0%` 告警色）全矩阵。
+- [x] **T2（P2）Language Server 故障降级、过期缓存标识与状态 ETag 联动**：在 [collector.mjs](./sidecars/dashboard/collector.mjs) 的 `getHostUserStatus` 独立维护 `lastGoodHostData` 与结构化 `quotaStatus`（区分 `unavailable`、`error`、`live`、`degraded`、`stale` 五态及 `lastSuccessAt` / `summaryLastSuccessAt`）；单接口或全接口故障保留上次成功数据作参考时显式标记 `stale` / `summaryStale` 与原成功时间，持续故障不覆盖原成功时间，恢复后更新成功时间并清除过期标识；将稳定状态字段纳入 `host.sig` 与 `scanConversation` / `collectTokenHistory` 的 ETag（排除易变墙钟毫秒，确保正常无变化轮询 ETag 稳定而状态跃迁即刻刷新），并在 [index.html](./sidecars/dashboard/index.html)、[app.js](./sidecars/dashboard/app.js)、[float_window.mjs](./sidecars/dashboard/float_window.mjs) 与 [cli.mjs](./sidecars/dashboard/cli.mjs) 同步展示缓存/降级提示。
+- [x] **T3（P2）未知模型窗口容量保持未知并与用户对比基准解耦**：移除 [collector.mjs](./sidecars/dashboard/collector.mjs) 与 [app.js](./sidecars/dashboard/app.js) 中无服务端 `maxContextTokens` 依据时的 `256000` 硬编码上限，新增 `budgetSource`（`server` / `unknown` / `user`）；自动模式下保留已知 `usedTokens` 并将 `budget`、`remaining`、`percent` 置为 `null`，UI 与 CLI 明确展示「未知」与「容量未知」（不再误判「运行健康」或「待首轮请求」），用户主动切换 `200K / 256K / 1M` 时明确标注为「用户对比基准（非服务端阈值）」；同时同步修正双语 README 目录树对 `pricing.mjs` 职责的描述。
+- **后置建议（未确认，不阻塞当前交付）**：API 费率溯源与可选本地覆盖、跨平台 / Node.js 18 实测矩阵、基于实测的大日志偏移量缓存、按需历史导出 CLI（详见 [第三轮报告](docs/CODEX_REVIEW_2026-11-12_THIRD.md)，无需整体重写 Rust）。
+
+## 第二轮审查确认与 `v1.6.3` 收口记录（2026-11-12 18:50 北京时间）
+
+- [x] **F1（P2）同品牌多配额池身份关联与单模型/列表展示统一**：在 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 抽离统一的 `resolveConfigSummaryGroup` 与 `buildQuotaPools`，使 `groupModelQuotas` 与 `resolveModelQuota` 共用同一池构建结果；按 `explicitPoolId / groupId`（`120`）-> `models / modelIds`（`110`）-> 明确子族词（`90`）-> 品牌词（`70`）-> 第三方兜底（`50`）严格分层，显式池 ID 或 `modelIds` 不匹配时不再回退通用品牌词，同分歧义候选直接返回 `null` 保留原始 `quotaInfo`，消除按字母序误绑其他池的问题。
+- [x] **F2（P2）泛化 `usage` 响应轮次判定统一与 `pendingTokens` 去重**：在 [collector.mjs](./sidecars/dashboard/collector.mjs) 抽离统一谓词 `isModelTurnStep`，同步用于 `listRecentConversations`、`scanConversation` 首遍扫描与次遍轮次构建及 `collectTokenHistory`；在每个 turn 记录真实数组下标 `_arrayIdx`（序列化前剥离），基于最近有效轮次精确计算 `lastCoveredArrayIdx` 并跳过报错步骤文本，消除非 `PLANNER_RESPONSE` 泛化响应将本轮输入输出重复累加进 `pendingTokens` 的问题；同时修复切换至未知模型时 `currentModelKey` 误继承上一轮旧 `modelKey` 的边界问题。
+- [x] **F3（P2）浏览器回退小窗关闭按钮同步通知后端退出**：在 [float_window.mjs](./sidecars/dashboard/float_window.mjs) 的 `createFallbackHttpServer` 桥接脚本中，将 `window.sidecar.closeFloatWindow` 升级为读取 `<meta name="cv-csrf-token">` 发送鉴权 `POST /api/float-window` 后再调用 `window.close()`，并在 [app.js](./sidecars/dashboard/app.js) 同步 `await` 关闭链路，确保点击回退小窗关闭按钮后服务端进程退出并清理 `float_window_state.json`。
+- [x] **F4（P2）守护进程版本升级与源码构建指纹自愈**：在 [float_window.mjs](./sidecars/dashboard/float_window.mjs) 将 `DAEMON_VERSION` 升至 `5`，并对 7 个核心运行时与前端打包文件计算确定性 SHA-256 指纹 `DAEMON_BUILD_ID`；`ensure-menubar` 与 `refresh-session` 检测到旧版本或旧指纹守护时自动终止重建，完整保留既有 `windowVisible`、`pinned` 与 `menubarMode` 偏好，已是最新指纹时零重启复用。
+- [x] **附加细节与全链路测试补齐**：将 [scripts/package-release.mjs](./scripts/package-release.mjs) 打包 ZIP 内 README 重写的在线图片基址由 `main` 改为对应版本 tag `v<version>`；在 [scripts/verify.mjs](./scripts/verify.mjs) 补齐 F1–F4 真实调用链行为回归（双 Gemini 池 `scanConversation` -> `formatStatusItemFromSnapshot`、`MODEL_RESPONSE` 完成轮次与追加未发送 `USER_INPUT` / 未知模型切换、回退 HTML 桥接 + `app.js` `#btn-float` 点击关闭、真实子进程守护升级与偏好保留）。
+
+## 本次审查确认与修复进度（2026-11-12）
+
+- **第一轮 8 项修复实现记录（第二轮验收与未完成项见上）**：
+  - [x] **R1（P1）本地 HTTP 写接口授权边界**：在 [collector.mjs](./sidecars/dashboard/collector.mjs)、[main.mjs](./sidecars/dashboard/main.mjs)、[float_window.mjs](./sidecars/dashboard/float_window.mjs) 与 [app.js](./sidecars/dashboard/app.js) 为 `standalone` Web 与浏览器回退小窗双 HTTP 入口统一接入 `Host` 白名单、敏感路由 `Origin` / `Sec-Fetch-Site` 校验、`POST` 强制 `Content-Type: application/json` 与进程级随机令牌 `X-CV-Token`（`timingSafeEqual`），保持官方 `sidecar_sdk` 与 macOS 原生内存 IPC 零额外请求头影响。
+  - [x] **R2（P2）日历热力图日期回退修复**：移除 [app.js](./sidecars/dashboard/app.js) 中重复的第一次 `startSun.setDate` 回退，抽离 `computeHeatmapDateWindow` 按 `53 * 7`（`371` 天）精确对齐周日与周六并修正翻页步长与区间标题（`2026-11-12` 现正确覆盖 `2025-11-09 至 2026-11-14`）。
+  - [x] **R3（P2）配额与状态变化纳入内容 ETag**：在 [collector.mjs](./sidecars/dashboard/collector.mjs) 为 `getHostUserStatus` 计算稳定内容签名 `sig`，并对 `scanConversation` 与 `collectTokenHistory` 的完整稳定业务载荷（含 `quotas` / `modelQuotas`、`planStatus`、来源拆分与费用归因，排除易变扫描时间戳）生成 SHA-1 ETag。
+  - [x] **R4（P2）配额池稳定身份分池**：重构 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 的 `matchQuotaSummaryGroup` 与 `groupModelQuotas`，按显式池 ID -> 确定性计分的 `summary` 组身份 -> 模型家族键分层聚合，杜绝不同品牌因相同余额 / 重置时间或缺失 `quotaInfo` 被合并，且不受 `quotaSummaryGroups` 顺序影响。
+  - [x] **R5（P2）离线会话与全局历史模型计费统一**：在 [collector.mjs](./sidecars/dashboard/collector.mjs) 抽离共用 `extractStepModel` 与 `extractStepUsage`（兼容 `input_tokens`、`chatModel.usage`、`usage`），无语言服务且无模型切换提示文本时，单会话与全局历史识别一致的模型与 API 参考费用。
+  - [x] **R6（P2）模型版本号小数点保留**：修正 [collector.mjs](./sidecars/dashboard/collector.mjs) 的 `parseModelSettingFromText` 终止条件，仅在句末句号（`\.(?=\s|$|<)`）、换行或标签处截断，完整保留 `Gemini 3.8 Flash`、`Gemini 3.1 Pro (High)`、`Claude Opus 5.5` 等带小数点及括号档位名称。
+  - [x] **R7（P2）畸形请求 URL 防崩溃保护**：在 `guardLoopbackRequest` 与双 HTTP 服务顶层异常捕获中拦截 `//[`、`//evil`、反斜杠及非法 URL，统一返回 `400` 且保持进程存活。
+  - [x] **R8（P2）Windows 非 ASCII 路径命令入口**：重写 [install.ps1](./install.ps1) 的命令入口生成逻辑，改为纯 ASCII 的 `agy-context.cmd`（`"%~dp0agy-context-loader.mjs"`）配合 UTF-8 Base64 解码的纯 ASCII `agy-context-loader.mjs`，规避 `Set-Content -Encoding ASCII` 损毁中文路径及 Windows 代码页 / BOM 兼容问题。
+- **已同步落地的维护优化（S1–S7 全量完成）**：
+  - **S1**：[float_window.mjs](./sidecars/dashboard/float_window.mjs) 子进程早退即刻中断等待（消除无 `swiftc` 时 15 秒空等）并返回明确的 `xcode-select --install` 诊断提示；[install.sh](./install.sh) 与中英文 README 补齐 Swift 工具链前置说明及 Windows / Linux 浏览器小窗能力差异。
+  - **S2**：移除 [index.html](./sidecars/dashboard/index.html) 中全部 Google Fonts `<link>`，改用宿主注入字体与本地系统字体栈（[styles.css](./sidecars/dashboard/styles.css)），并在 [scripts/verify.mjs](./scripts/verify.mjs) 强制校验 `index.html` / `styles.css` 零外部 `http(s)://` 资源链接。
+  - **S3**：[install.ps1](./install.ps1) 补齐源文件完整性预检、`sidecar.json` 末尾重命名替换、卸载时清理 `agy-context-loader.mjs` 与保留偏好提示；中英文 README 准确区分就地热更新与保留 `settings_v1.json`。
+  - **S4**：收紧 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 的 `normalizeModelId` 为仅精确匹配已知代际版本；未知或历史代际名称（如 `Claude 3.5 Sonnet`、`Gemini 1.5 Flash`）返回 `null` 归入 `unsupportedModel` 未定价请求（保留真实显示名并在混合模式下按基准均价折算），并在 [scripts/verify.mjs](./scripts/verify.mjs) 增加代际边界断言。
+  - **S5**：收窄 [scripts/verify.mjs](./scripts/verify.mjs) 与双语 README 中关于模式检查的表述，区分常见敏感模式 / PNG 文本块检查与完整安全审计。
+  - **S6**：在 [scripts/verify.mjs](./scripts/verify.mjs) 新增完全隔离目录（自动清理、零触碰 `~/.gemini`）的 R1–R8、S2 / S4 与 F1–F4 行为回归测试套件。
+  - **S7**：将 [plugin.json](./plugin.json)、[index.html](./sidecars/dashboard/index.html)、[cli.mjs](./sidecars/dashboard/cli.mjs)（动态读取 `plugin.json`）与双语 README 统一升至 `v1.6.3`；执行 `./install.sh` 完成本机就地升级与菜单栏守护热接管；使用隔离合成样本通过无头 Chrome 真实渲染重拍并脱敏剥离元数据生成 `docs/images/usage-trends.png`（`2025-11-09 至 2026-11-12` 多级热力格子与区间汇总正常显示）。
+- **待触发外部动作（暂未执行）**：尚未执行 `git add / commit / tag / push` 及 GitHub Release 上传。
+- **未覆盖环境说明**：本机验证环境为 macOS + Node.js `v24.14.1`（已完成本机 `./install.sh` 覆盖安装、菜单栏守护运行与 Chrome 无头渲染核验）；尚未在 Windows PowerShell 5.1 / 7 + `cmd.exe`、Linux 桌面环境及 Node.js 18 最低版本实机运行。
 
 ## 阶段里程碑与验收记录
 
@@ -32,6 +78,7 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs` -- 通过，涵盖 Ultra 档位与家庭组折算、`5h + Week` 双维度配额聚合、全仓文本与 PNG 元数据隐私审计及冒烟测试（2026-11-12 16:18 北京时间）
-- `node scripts/package-release.mjs` -- 通过，生成 `dist/context-viewer-v1.6.2.zip` 与 `.sha256`（2026-11-12 16:18 北京时间）
-- `./install.sh` + 本机守护进程热更新验证 -- 通过，准确展示 `Google AI Ultra`（`$249.99/月` 参考价）与 `5h + Week` 双配额条（2026-11-12 15:18 北京时间）
+- `node scripts/verify.mjs` -- 通过（6/6 阶段，检查 36 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感模式与 `docs/images/*.png` 元数据块检查、零外部静态链接（S2）、精确模型代际（S4）、CSS 隔离及 R1–R8、F1–F4、T1–T3 全部全链路行为回归（2026-11-12 23:03 北京时间）
+- `./install.sh` -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已就地同步含 T1–T3 修复的 `1.6.3`（`DAEMON_BUILD_ID` 自动触发菜单栏守护热升级，2026-11-12 23:03 北京时间）
+- `node scripts/package-release.mjs` + `(cd dist && LC_ALL=C shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（`138.5 KB`，20 个文件，不含 `docs/`，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-12 23:03 北京时间）
+- `bash -n install.sh` 与 `git diff --check` -- 通过（2026-11-12 23:03 北京时间）

@@ -142,12 +142,26 @@ function main() {
     ['sidecars/dashboard/app.js', false]
   ];
 
+  const repoSlug = String(manifest.repository || 'https://github.com/Dong-Kevin/agy-context-viewer')
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '');
+  const onlineDocsImagesBase = `https://raw.githubusercontent.com/${repoSlug}/v${version}/docs/images/`;
+
   const entries = relFiles.map(([rel, executable]) => {
     const abs = join(ROOT, rel);
     statSync(abs); // throws if missing
+    let data = readFileSync(abs);
+    if (rel === 'README.md' || rel === 'README_EN.md') {
+      const rewritten = data
+        .toString('utf-8')
+        .replace(/(src=["'])docs\/images\//g, `$1${onlineDocsImagesBase}`)
+        .replace(/(\]\()docs\/images\//g, `$1${onlineDocsImagesBase}`);
+      data = Buffer.from(rewritten, 'utf-8');
+    }
     return {
       zipPath: `${prefix}/${rel}`,
-      data: readFileSync(abs),
+      data,
       executable
     };
   });
