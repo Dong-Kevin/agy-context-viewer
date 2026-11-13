@@ -44,6 +44,7 @@ import {
   PRICING_VERIFIED_DATE,
   resolveEffectivePlanStatus,
   resolveModelQuota,
+  sanitizeDiagnosticText,
   SUBSCRIPTION_ACQUISITION_PRESETS,
   SUBSCRIPTION_REGIONS_PRESET,
   summarizeApiCost
@@ -1900,7 +1901,10 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     tps: t.tps,
     costUSD: t.costUSD
   }));
-  const turnsPayload = turns.slice(-40).reverse().map(({ contextBreakdown: _cb, hasRecordedModel: _hrm, _arrayIdx: _ai, ...rest }) => rest);
+  const turnsPayload = turns.slice(-40).reverse().map(({ contextBreakdown: _cb, hasRecordedModel: _hrm, _arrayIdx: _ai, ...rest }) => ({
+    ...rest,
+    error: rest.error ? sanitizeDiagnosticText(rest.error, 200) : ''
+  }));
   const auditPayload = {
     totalSteps,
     turnsCount: turns.length,

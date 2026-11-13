@@ -246,13 +246,18 @@ async function main() {
     }
   }
 
-  console.log('[verify] 3/6 执行常见敏感路径、令牌模式与 PNG 文本元数据块检查...');
+  console.log('[verify] 3/6 执行常见敏感路径、令牌模式、PNG 文本元数据块与 Git 身份隐私检查...');
+  const strictGitIdentity = process.argv.includes('--strict-git-identity');
   const forbiddenPatterns = [
     { re: /\/Users\/[A-Za-z0-9._-]+/, label: 'macOS 个人主目录绝对路径 (/Users/...)' },
     { re: /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/, label: 'Windows 个人主目录绝对路径 (C:\\Users\\...)' },
     { re: /\/home\/[a-z0-9._-]+\//, label: 'Linux 个人主目录绝对路径 (/home/...)' },
     { re: /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, label: '会话 UUID 硬编码' },
-    { re: /\b(AIza[0-9A-Za-z-_]{35}|ghp_[0-9A-Za-z]{36}|sk-[0-9A-Za-z]{32,})\b/, label: '疑似 API Key / Token' }
+    { re: /\b(AIza[0-9A-Za-z-_]{35}|ghp_[0-9A-Za-z]{36}|sk-[0-9A-Za-z]{32,})\b/, label: '疑似 API Key / Token' },
+    { re: /\b[A-Za-z0-9._%+-]+@(?!users\.noreply\.github\.com\b|example\.(?:com|org|net)\b|localhost\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/, label: '未脱敏邮箱地址' },
+    { re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/, label: 'PEM 私钥头' },
+    { re: /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/, label: '疑似明文 Bearer Token' },
+    { re: /\bhttps?:\/\/[^/\s:@]+:[^/\s@]+@/, label: '带内联凭据的 URL' }
   ];
   const verifyRel = relative(ROOT, fileURLToPath(import.meta.url));
   const binaryExts = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico']);
@@ -284,7 +289,59 @@ async function main() {
     const text = readFileSync(f, 'utf-8');
     for (const pat of forbiddenPatterns) {
       const m = text.match(pat.re);
-      assert(!m, `文件 ${rel} 命中敏感内容规则 [${pat.label}]：${m?.[0]}`);
+      const preview = m?.[0] ? `${m[0].slice(0, 4)}***` : '';
+      assert(!m, `文件 ${rel} 命中敏感内容规则 [${pat.label}]：${preview}`);
+    }
+  }
+
+  // Verify repository-managed pre-push hook script syntax and executable bit
+  const prePushHookPath = join(ROOT, 'scripts', 'pre-push');
+  assert(existsSync(prePushHookPath), '缺少仓库管理的 scripts/pre-push 钩子脚本');
+  execFileSync('bash', ['-n', prePushHookPath], { stdio: 'pipe' });
+  if (process.platform !== 'win32') {
+    assert((statSync(prePushHookPath).mode & 0o111) !== 0, 'scripts/pre-push 缺少可执行权限');
+  }
+
+  // V1: Check unpushed Git commit metadata for non-noreply personal emails without printing plaintext emails/names
+  if (existsSync(join(ROOT, '.git'))) {
+    const isSafeCommitEmail = (email) => /@(?:users\.noreply\.github\.com|example\.(?:com|org|net))$/i.test(String(email || '').trim());
+    let localGitEmail = '';
+    try {
+      localGitEmail = execFileSync('git', ['config', '--local', '--get', 'user.email'], { cwd: ROOT, stdio: 'pipe', encoding: 'utf-8' }).trim();
+    } catch {}
+    let revRange = '';
+    try {
+      execFileSync('git', ['rev-parse', '--verify', 'origin/main'], { cwd: ROOT, stdio: 'pipe' });
+      revRange = 'origin/main..HEAD';
+    } catch {
+      revRange = '-n5';
+    }
+    let gitLogRaw = '';
+    try {
+      gitLogRaw = execFileSync(
+        'git',
+        ['log', ...(revRange === '-n5' ? ['-n', '5'] : [revRange]), '--format=%h|%ae|%ce'],
+        { cwd: ROOT, stdio: 'pipe', encoding: 'utf-8' }
+      ).trim();
+    } catch {}
+    const nonNoreplyHashes = [];
+    for (const line of gitLogRaw ? gitLogRaw.split(/\r?\n/) : []) {
+      const [shortHash, ae, ce] = line.split('|');
+      if (shortHash && (!isSafeCommitEmail(ae) || !isSafeCommitEmail(ce))) {
+        nonNoreplyHashes.push(shortHash);
+      }
+    }
+    const localEmailNeedsFix = Boolean(strictGitIdentity && localGitEmail && !isSafeCommitEmail(localGitEmail));
+    if (nonNoreplyHashes.length > 0 || localEmailNeedsFix) {
+      const msgParts = [];
+      if (nonNoreplyHashes.length > 0) msgParts.push(`未推送提交 (${nonNoreplyHashes.join(', ')}) 包含非 GitHub noreply 邮箱`);
+      if (localEmailNeedsFix) msgParts.push('仓库本地 user.email 为非 noreply 邮箱');
+      const summaryMsg = `${msgParts.join('；')}，推送前请确认公开身份或配置仓库级 noreply`;
+      if (strictGitIdentity || (localGitEmail && isSafeCommitEmail(localGitEmail))) {
+        assert(false, `V1 Git 身份门禁阻断：${summaryMsg}`);
+      } else {
+        console.log(`[verify] ⚠ 隐私提示：${summaryMsg}（运行 node scripts/verify.mjs --strict-git-identity 可严格阻断）`);
+      }
     }
   }
 
@@ -385,13 +442,39 @@ async function main() {
 
   // Pricing, S4 generational precision, R4 & F1 quota grouping / single-model parity checks
   const {
+    classifyRequestError,
     groupModelQuotas,
+    maskEmail,
     normalizeModelId,
     parseUserPlanStatus,
     resolveEffectivePlanStatus,
     resolveModelQuota,
+    sanitizeDiagnosticText,
     summarizeApiCost
   } = await import(join(ROOT, 'sidecars', 'dashboard', 'pricing.mjs'));
+
+  // Privacy hardening: custom-domain email masking & error diagnostic sanitization
+  assert(
+    maskEmail('demo@gmail.com') === 'de***@gmail.com' &&
+      maskEmail('owner@custom-studio.dev') === 'ow***@c***.dev' &&
+      maskEmail('staff@eng.corp.co.uk') === 'st***@e***.co.uk',
+    `自定义域邮箱掩码结果异常：gmail=${maskEmail('demo@gmail.com')}, custom=${maskEmail('owner@custom-studio.dev')}, uk=${maskEmail('staff@eng.corp.co.uk')}`
+  );
+  const rawSensitiveErr = '503 UNAVAILABLE https://api.internal.test/v1?key=1 Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 sk-abcdefghijklmnopqrstuvwxyz123456 /Users/secretuser/proj/a.js admin@private-corp.io';
+  const cleanDiag = sanitizeDiagnosticText(rawSensitiveErr, 300);
+  const cleanErrObj = classifyRequestError(rawSensitiveErr);
+  assert(
+    !cleanDiag.includes('api.internal.test') &&
+      !cleanDiag.includes('eyJhbGci') &&
+      !cleanDiag.includes('abcdefghijklmnopqrstuvwxyz') &&
+      !cleanDiag.includes('secretuser') &&
+      !cleanDiag.includes('private-corp') &&
+      cleanErrObj.kind === 'service_unavailable' &&
+      !cleanErrObj.diagnostic.includes('secretuser') &&
+      !cleanErrObj.diagnostic.includes('private-corp') &&
+      !cleanErrObj.diagnostic.includes('eyJhbGci'),
+    `错误诊断脱敏失败或破坏错误分类：kind=${cleanErrObj.kind}, diag=${cleanErrObj.diagnostic}`
+  );
 
   // S4: Exact generational matching only — unknown or older generations must return null (unpriced -> Hybrid)
   assert(normalizeModelId('Gemini 4 Carbon (High)') === 'gemini-4-carbon', 'S4 Gemini 4 Carbon 匹配异常');
@@ -1589,6 +1672,41 @@ async function main() {
       delete process.env.ANTIGRAVITY_CSRF_TOKEN;
       await new Promise((r) => u2Server.close(r));
       rmSync(join(isolatedAgDir, 'brain', u2ConvId), { recursive: true, force: true });
+    }
+
+    // Privacy runtime check: synthetic error diagnostics & paths/tokens/emails in turnsPayload must be sanitized
+    const privConvId = 'c3000000-0000-4000-8000-000000000003';
+    const privLogDir = join(isolatedAgDir, 'brain', privConvId, '.system_generated', 'logs');
+    mkdirSync(privLogDir, { recursive: true });
+    try {
+      const privSteps = [
+        { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:00:00Z', content: 'run sensitive error test' },
+        {
+          step_index: 1,
+          type: 'PLANNER_RESPONSE',
+          status: 'ERROR',
+          created_at: '2026-11-12T10:00:05Z',
+          model: 'Claude Sonnet 5.5',
+          usage: { input_tokens: 1200, output_tokens: 10 },
+          content: 'Failed calling https://secret.internal.net/v1 with Bearer secret_bearer_token_1234567890 for /Users/mockuser/secret.txt and leak@mycorp-internal.io'
+        }
+      ];
+      writeFileSync(
+        join(privLogDir, 'transcript.jsonl'),
+        privSteps.map((s) => JSON.stringify(s)).join('\n') + '\n',
+        'utf-8'
+      );
+      const privSnap = await scanConversation(privConvId, { force: true });
+      const privJson = JSON.stringify(privSnap);
+      assert(
+        !privJson.includes('secret_bearer_token') &&
+          !privJson.includes('mockuser') &&
+          !privJson.includes('mycorp-internal') &&
+          !privJson.includes('secret.internal.net'),
+        `运行时快照 turnsPayload/error 仍残留未脱敏诊断片段：${privJson}`
+      );
+    } finally {
+      rmSync(join(isolatedAgDir, 'brain', privConvId), { recursive: true, force: true });
     }
 
     // R8: Windows PowerShell Unicode-safe Base64 loader shim in non-ASCII + space directory

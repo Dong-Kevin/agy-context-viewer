@@ -469,6 +469,23 @@ export function resolveModelQuota(modelNameOrKey, clientModelConfigs = [], quota
   };
 }
 
+export function sanitizeDiagnosticText(raw, maxLen = 140) {
+  if (!raw || typeof raw !== 'string') return '';
+  let out = raw
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '<API>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer <REDACTED>')
+    .replace(/\b(AIza[0-9A-Za-z-_]{20,}|ghp_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|sk-[0-9A-Za-z_-]{16,}|ya29\.[0-9A-Za-z._-]{20,})\b/g, '<REDACTED>')
+    .replace(/\/Users\/[A-Za-z0-9._-]+/g, '~')
+    .replace(/\/home\/[a-z0-9._-]+/gi, '~')
+    .replace(/[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/g, '~')
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, (m) => maskEmail(m) || '<EMAIL>')
+    .trim();
+  if (maxLen > 0 && out.length > maxLen) {
+    out = out.slice(0, Math.max(1, maxLen - 3)) + '...';
+  }
+  return out;
+}
+
 export function classifyRequestError(rawInput, options = {}) {
   const error = typeof rawInput === 'string' ? rawInput : String(rawInput?.error || rawInput?.message || '');
   const currentModel = options.currentModel || '';
@@ -487,8 +504,7 @@ export function classifyRequestError(rawInput, options = {}) {
     };
   }
 
-  let diagnostic = error.replace(/https?:\/\/[^\s"']+/g, '<API>').trim();
-  if (diagnostic.length > 140) diagnostic = diagnostic.slice(0, 137) + '...';
+  const diagnostic = sanitizeDiagnosticText(error, 140);
 
   const isDeadlineTimeout = /context deadline exceeded|deadline exceeded|stream idle timeout/i.test(error);
   const overflowMatch = !isDeadlineTimeout && error.match(/input token count exceeds|context\s*(?:window|length|tokens?|limit|size|capacity)?.{0,35}(?:exceed|too long)|maximum context length|prompt exceeds maximum context length|max_tokens exceeded/i);
@@ -1016,11 +1032,36 @@ export function convertToUSD(amount, currency = 'USD', regionHint = null) {
   return Number((cny / CURRENCY_RATE_TO_CNY.USD).toFixed(2));
 }
 
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com',
+  'icloud.com', 'me.com', 'qq.com', 'foxmail.com', '163.com', '126.com',
+  'yahoo.com', 'proton.me', 'protonmail.com', 'users.noreply.github.com',
+  'example.com', 'example.org', 'example.net'
+]);
+
 export function maskEmail(email) {
   if (!email || typeof email !== 'string' || !email.includes('@')) return null;
-  const [local, domain] = email.split('@');
-  if (local.length <= 2) return `${local[0] || '*'}***@${domain}`;
-  return `${local.slice(0, 2)}***@${domain}`;
+  const trimmed = email.trim();
+  const atIdx = trimmed.lastIndexOf('@');
+  if (atIdx <= 0 || atIdx >= trimmed.length - 1) return null;
+  const local = trimmed.slice(0, atIdx);
+  const domain = trimmed.slice(atIdx + 1);
+  const maskedLocal = local.includes('*')
+    ? local
+    : (local.length <= 2 ? `${local[0] || '*'}***` : `${local.slice(0, 2)}***`);
+  const domLower = domain.toLowerCase();
+  if (PUBLIC_EMAIL_DOMAINS.has(domLower) || domain.includes('*')) {
+    return `${maskedLocal}@${domain}`;
+  }
+  const parts = domain.split('.').filter(Boolean);
+  if (parts.length < 2) {
+    return `${maskedLocal}@${domain[0] || '*'}***`;
+  }
+  const first = parts[0];
+  const tldSuffix = parts.length >= 3 && parts[parts.length - 2].length <= 3
+    ? parts.slice(-2).join('.')
+    : parts[parts.length - 1];
+  return `${maskedLocal}@${first[0] || '*'}***.${tldSuffix}`;
 }
 
 export function parseUserPlanStatus(raw) {

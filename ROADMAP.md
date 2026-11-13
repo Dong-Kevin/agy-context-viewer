@@ -2,7 +2,16 @@
 
 ## 当前阶段
 
-前三轮审查修复与 `v1.6.3` 基线已提交至本地 `main`（`1a461cb`）；[第四轮报告](docs/CODEX_REVIEW_2026-11-12_FOURTH.md) 确认的 **U1–U3** 三项 P2 组合边界均已完成修复、补齐交叉回归、覆盖安装至本机 `~/.gemini/config/plugins/context-viewer` 并提交至本地 `main`。远端 `git push / tag` 与 GitHub Release 发布仍待明确授权。
+已按授权将仓库局部 `.git/config` 绑定为 `Dong-Kevin` 的 GitHub `users.noreply.github.com` 身份，将尚未推送的两笔提交重写为 `be02146` 与 `7f0be5d`（**V1** 已完成），启用 `.git/hooks/pre-push` 软链接，并将 [第五轮代码与隐私复查](docs/CODEX_REVIEW_2026-11-13_PRIVACY.md) 隐私脱敏与门禁加固提交至本地 `main`、同步安装至本机 `~/.gemini/config/plugins/context-viewer`。**下一步待确认事项**：「自定义快捷键开关侧边栏看板」的交互形态与默认键位确认（见下）；远端 `git push / tag` 与 GitHub Release 发布仍待明确授权。
+
+## 第五轮代码与隐私复查（2026-11-13 11:45 北京时间）
+
+- [x] 核实第五轮报告与根目录隐私状况：U1–U3 均已合入、静态/ZIP/截图均无凭据或完整个人账号；确认 **V1** 根因为仓库 `.git/config` 未设置局部身份，原未推送提交回退使用了全局身份（`origin/main` 为 `4256ee3`，使用 `Dong-Kevin` 与 GitHub noreply 身份）。
+- [x] **隐私脱敏加固**：在 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 为 `maskEmail` 增加自定义域/企业域二级域主体掩码，新增并导出 `sanitizeDiagnosticText` 对 URL、Bearer / API Key、`~` 用户主目录路径及邮箱脱敏；在 `classifyRequestError` 与 [collector.mjs](./sidecars/dashboard/collector.mjs) 导出的 `turnsPayload[].error` 同步调用。
+- [x] **静态扫描与推送前身份门禁**：在 [verify.mjs](./scripts/verify.mjs) 补充未脱敏邮箱、PEM 私钥头、Bearer Token 与带凭据 URL 扫描、自定义域邮箱掩码及运行时错误脱敏隔离测试，并新增未推送提交 `--strict-git-identity` 检查（当仓库局部 `user.email` 为 noreply 时默认自动阻断非 noreply 提交，不回显敏感原文）；新增确定性仓库钩子 [scripts/pre-push](./scripts/pre-push) 并已通过 `.git/hooks/pre-push` 软链接启用。
+- [x] **V1 未推送提交身份重设与仓库局部身份锁定**：已在当前仓库 `.git/config` 写入 `Dong-Kevin` 与 `4256ee3` 同源 GitHub noreply 邮箱，并将未推送的前两笔提交重写为 `be02146` 与 `7f0be5d`，通过 `node scripts/verify.mjs --strict-git-identity` 零警告校验。
+- [ ] **待决策：快捷键开关上下文看板形态确认**：宿主官方 `sidecar_sdk`（`v2.31.2`）未开放从后台唤起已关闭「宿主内嵌右侧栏（Aux Pane）」的插件快捷键接口，且遵守不改写 `app.asar` / `~/.gemini/config/config.json` 边界；建议基于常驻原生右侧栏守护进程（`Carbon` `RegisterEventHotKey` 零辅助功能权限弹窗）实现一键开关贴靠右侧的侧栏看板（默认 `⌥⌘K`，仅 Antigravity 或看板前台生效并可选全局，支持面板按键录制自定义与 `agy-context shortcut` CLI），待确认后实施。
+- **验证与未实测范围**：本机 macOS + Node.js `v24.14.1` 上 `verify.mjs --strict-git-identity`（6/6 阶段，39 个文件）零警告通过，打包（`140.3 KB`，20 项）与 `./install.sh` 通过；Windows / Linux 桌面、Node.js 18 及其他后置建议仍未实测 / 未实施。
 
 ## 第四轮审查修复与验收记录（2026-11-13 09:15 北京时间）
 
@@ -77,7 +86,7 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs` -- 通过（6/6 阶段，检查 37 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感模式与 `docs/images/*.png` 元数据块检查、零外部静态链接（S2）、精确模型代际（S4）、CSS 隔离及 R1–R8、F1–F4、T1–T3、U1–U3 全部全链路与交叉组合回归（2026-11-13 09:15 北京时间）
-- `./install.sh` -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已就地同步含 U1–U3 修复的 `1.6.3`（`DAEMON_BUILD_ID` 自动触发菜单栏守护热升级，2026-11-13 09:15 北京时间）
-- `node scripts/package-release.mjs` + `(cd dist && LC_ALL=C shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（`139.6 KB`，20 个文件，不含 `docs/`，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-13 09:15 北京时间）
-- `bash -n install.sh` 与 `git diff --check` -- 通过（2026-11-13 09:15 北京时间）
+- `node scripts/verify.mjs --strict-git-identity` -- 零警告通过（6/6 阶段，检查 39 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感路径/邮箱/私钥/凭据与 `docs/images/*.png` 元数据块检查、`scripts/pre-push` 语法、`origin/main..HEAD` 全部提交 noreply 身份门禁、零外部静态链接（S2）、精确模型代际（S4）、CSS 隔离、自定义域邮箱与错误诊断脱敏及 R1–R8、F1–F4、T1–T3、U1–U3 全部回归（2026-11-13 11:45 北京时间）
+- `./install.sh` -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已就地同步含隐私脱敏加固的 `1.6.3`（2026-11-13 11:03 北京时间）
+- `node scripts/package-release.mjs` + `(cd dist && LC_ALL=C shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（`140.3 KB`，20 个文件，不含 `docs/` 与 `scripts/pre-push`，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-13 11:03 北京时间）
+- `bash -n install.sh`、`bash -n scripts/pre-push` 与 `git diff --check` -- 通过（2026-11-13 11:45 北京时间）
