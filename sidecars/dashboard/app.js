@@ -78,6 +78,22 @@
     menubarEnabled: window.__CV_MENUBAR_ENABLED__ ?? true,
     menubarMode: window.__CV_MENUBAR_MODE__ || 'context',
     menubarSupported: true,
+    shortcut: window.__CV_SHORTCUT_INIT__ || (() => {
+      const mac = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
+      const defAcc = mac ? 'Alt+Meta+K' : 'Ctrl+Alt+K';
+      const defDisp = mac ? '⌥⌘K' : 'Ctrl+Alt+K';
+      return {
+        enabled: true,
+        accelerator: defAcc,
+        display: defDisp,
+        defaultAccelerator: defAcc,
+        defaultDisplay: defDisp,
+        isDefault: true,
+        scope: 'app',
+        nativeGlobalSupported: mac
+      };
+    })(),
+    recordingShortcut: false,
     hostHidden: Boolean(window.__CV_INITIAL_HIDDEN__),
     floatRunning: Boolean(window.__CV_FLOAT_MODE__) && !Boolean(window.__CV_INITIAL_HIDDEN__),
     floatPinned: Boolean(window.__CV_FLOAT_PINNED__ ?? true),
@@ -453,6 +469,9 @@
       }
       if (typeof s.entrypoints?.sidebarEnabled === 'boolean') {
         state.sidebarEntryEnabled = s.entrypoints.sidebarEnabled;
+      }
+      if (s.entrypoints?.shortcut && typeof s.entrypoints.shortcut === 'object') {
+        state.shortcut = { ...state.shortcut, ...s.entrypoints.shortcut };
       }
       applyAppearanceToDom();
       syncFloatButtonUi();
@@ -2258,6 +2277,7 @@
       $('btn-palette')?.setAttribute('aria-expanded', String(willOpen));
     });
     $('btn-close-palette')?.addEventListener('click', () => {
+      if (state.recordingShortcut) stopShortcutRecording();
       drawer?.classList.add('hidden');
       $('btn-palette')?.setAttribute('aria-expanded', 'false');
     });
@@ -2312,6 +2332,99 @@
     $('btn-drawer-float')?.addEventListener('click', () => {
       $('btn-float')?.click();
     });
+
+    // Customizable Keyboard Shortcut Recorder & Scope Controls
+    $('btn-record-shortcut')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (state.recordingShortcut) {
+        stopShortcutRecording();
+      } else {
+        startShortcutRecording();
+      }
+    });
+
+    $('btn-toggle-shortcut')?.addEventListener('click', () => {
+      if (state.recordingShortcut) stopShortcutRecording();
+      applyShortcutPatch({ enabled: !Boolean(state.shortcut?.enabled) });
+    });
+
+    $('btn-reset-shortcut')?.addEventListener('click', () => {
+      if (state.recordingShortcut) stopShortcutRecording();
+      applyShortcutPatch({ reset: true });
+    });
+
+    document.querySelectorAll('#shortcut-scope-seg .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (state.recordingShortcut) stopShortcutRecording();
+        const nextScope = btn.dataset.shortcutScope || 'app';
+        applyShortcutPatch({ scope: nextScope });
+      });
+    });
+
+    document.addEventListener('pointerdown', (ev) => {
+      if (!state.recordingShortcut) return;
+      const recBtn = $('btn-record-shortcut');
+      if (recBtn && !recBtn.contains(ev.target)) {
+        stopShortcutRecording();
+      }
+    });
+
+    window.addEventListener('blur', () => {
+      if (state.recordingShortcut) stopShortcutRecording();
+    });
+
+    window.addEventListener('keydown', (ev) => {
+      if (state.recordingShortcut) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.key === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+          stopShortcutRecording();
+          showToast('已取消快捷键录制');
+          return;
+        }
+        const parsed = buildAcceleratorFromKeyEvent(ev);
+        if (parsed.modifierOnly) {
+          const kbdEl = $('shortcut-kbd-label');
+          if (kbdEl) setText(kbdEl, parsed.preview || '按下组合键…');
+          return;
+        }
+        if (!parsed.ok) {
+          showToast(parsed.error || '组合键无效，请包含 ⌘ / ⌥ / ⌃ 修饰键（Esc 取消）');
+          syncFloatButtonUi();
+          return;
+        }
+        stopShortcutRecording();
+        applyShortcutPatch({ accelerator: parsed.accelerator, enabled: true });
+        return;
+      }
+
+      if (ev.repeat) return;
+      if (state.shortcut?.enabled && state.shortcut?.accelerator && eventMatchesAccelerator(ev, state.shortcut.accelerator)) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (window.__CV_FLOAT_MODE__) {
+          if (window.sidecar?.closeFloatWindow) {
+            window.sidecar.closeFloatWindow();
+          } else {
+            apiFetch('/api/float-window', { method: 'POST', body: { action: 'close' } }).catch(() => {});
+          }
+          return;
+        }
+        apiFetch('/api/float-window', {
+          method: 'POST',
+          body: { action: 'toggle' }
+        }).then((res) => {
+          if (!res?.ok) {
+            showToast(res?.error || '快捷键切换看板失败');
+            return;
+          }
+          state.floatRunning = Boolean(res.running);
+          state.floatPinned = Boolean(res.pinned);
+          syncFloatButtonUi();
+          showToast(res.message || (res.running ? '已通过快捷键打开右侧看板' : '已通过快捷键收回右侧看板'));
+        }).catch(() => {});
+      }
+    }, true);
 
     $('btn-theme')?.addEventListener('click', () => {
       const order = ['auto', 'light', 'dark'];
@@ -2522,6 +2635,148 @@
     });
   }
 
+  const SPECIAL_EVENT_CODES = new Set([
+    'Space', 'Backquote', 'Minus', 'Equal', 'BracketLeft', 'BracketRight',
+    'Backslash', 'Semicolon', 'Quote', 'Comma', 'Period', 'Slash'
+  ]);
+
+  const KEY_FALLBACK_MAP = {
+    ' ': 'Space',
+    '`': 'Backquote',
+    '~': 'Backquote',
+    '-': 'Minus',
+    '_': 'Minus',
+    '=': 'Equal',
+    '+': 'Equal',
+    '[': 'BracketLeft',
+    '{': 'BracketLeft',
+    ']': 'BracketRight',
+    '}': 'BracketRight',
+    '\\': 'Backslash',
+    '|': 'Backslash',
+    ';': 'Semicolon',
+    ':': 'Semicolon',
+    "'": 'Quote',
+    '"': 'Quote',
+    ',': 'Comma',
+    '<': 'Comma',
+    '.': 'Period',
+    '>': 'Period',
+    '/': 'Slash',
+    '?': 'Slash'
+  };
+
+  function extractShortcutKeyFromEvent(ev) {
+    const code = String(ev?.code || '');
+    if (/^Key([A-Z])$/.test(code)) return code.slice(3);
+    if (/^Digit([0-9])$/.test(code)) return code.slice(5);
+    if (/^F([1-9]|1[0-2])$/.test(code)) return code;
+    if (SPECIAL_EVENT_CODES.has(code)) return code;
+
+    const key = String(ev?.key || '');
+    if (KEY_FALLBACK_MAP[key]) return KEY_FALLBACK_MAP[key];
+    if (/^[a-zA-Z]$/.test(key)) return key.toUpperCase();
+    if (/^[0-9]$/.test(key)) return key;
+    if (/^F([1-9]|1[0-2])$/i.test(key)) return key.toUpperCase();
+    return null;
+  }
+
+  function formatModifierPreview(ev) {
+    const mac = state.shortcut?.nativeGlobalSupported !== false;
+    if (mac) {
+      let s = '';
+      if (ev.ctrlKey) s += '⌃';
+      if (ev.altKey) s += '⌥';
+      if (ev.shiftKey) s += '⇧';
+      if (ev.metaKey) s += '⌘';
+      return s ? `${s}…` : '按下组合键…';
+    }
+    const parts = [];
+    if (ev.ctrlKey) parts.push('Ctrl');
+    if (ev.altKey) parts.push('Alt');
+    if (ev.shiftKey) parts.push('Shift');
+    if (ev.metaKey) parts.push('Win');
+    return parts.length ? `${parts.join('+')}+…` : '按下组合键…';
+  }
+
+  function buildAcceleratorFromKeyEvent(ev) {
+    const code = String(ev?.code || '');
+    const keyName = String(ev?.key || '');
+    if (
+      ['Meta', 'Control', 'Alt', 'Shift', 'CapsLock', 'Fn'].includes(keyName) ||
+      /^(Meta|Control|Alt|Shift)(Left|Right)?$/.test(code)
+    ) {
+      return { modifierOnly: true, preview: formatModifierPreview(ev) };
+    }
+
+    const canonKey = extractShortcutKeyFromEvent(ev);
+    if (!canonKey) {
+      return { ok: false, error: '不支持该按键，请使用字母 A-Z、数字 0-9、F1-F12 或常用符号键' };
+    }
+    const isFnKey = /^F([1-9]|1[0-2])$/.test(canonKey);
+    if (!ev.ctrlKey && !ev.altKey && !ev.metaKey && !isFnKey) {
+      return { ok: false, error: '快捷键需包含 ⌘ / ⌥ / ⌃ 修饰键之一（或使用 F1-F12），按 Esc 取消' };
+    }
+
+    const parts = [];
+    if (ev.ctrlKey) parts.push('Ctrl');
+    if (ev.altKey) parts.push('Alt');
+    if (ev.shiftKey) parts.push('Shift');
+    if (ev.metaKey) parts.push('Meta');
+    parts.push(canonKey);
+    return { ok: true, accelerator: parts.join('+') };
+  }
+
+  function eventMatchesAccelerator(ev, acc) {
+    if (!acc) return false;
+    const parts = String(acc).split('+').filter(Boolean);
+    if (!parts.length) return false;
+    const targetKey = parts[parts.length - 1];
+    const modSet = new Set(parts.slice(0, -1));
+    const evKey = extractShortcutKeyFromEvent(ev);
+    if (!evKey || evKey !== targetKey) return false;
+    return (
+      Boolean(ev.ctrlKey) === modSet.has('Ctrl') &&
+      Boolean(ev.altKey) === modSet.has('Alt') &&
+      Boolean(ev.shiftKey) === modSet.has('Shift') &&
+      Boolean(ev.metaKey) === modSet.has('Meta')
+    );
+  }
+
+  function startShortcutRecording() {
+    state.recordingShortcut = true;
+    window.sidecar?.setShortcutRecording?.(true);
+    syncFloatButtonUi();
+  }
+
+  function stopShortcutRecording() {
+    if (!state.recordingShortcut) return;
+    state.recordingShortcut = false;
+    window.sidecar?.setShortcutRecording?.(false);
+    syncFloatButtonUi();
+  }
+
+  async function applyShortcutPatch(patch) {
+    try {
+      const res = await apiFetch('/api/entrypoints', {
+        method: 'POST',
+        body: { target: 'shortcut', ...patch }
+      });
+      if (res?.shortcut && typeof res.shortcut === 'object') {
+        state.shortcut = { ...state.shortcut, ...res.shortcut };
+      }
+      syncFloatButtonUi();
+      if (!res?.ok) {
+        showToast(res?.error || '设置快捷键失败');
+        return;
+      }
+      showToast(res.message || '已更新侧栏看板快捷键');
+    } catch (err) {
+      syncFloatButtonUi();
+      showToast(`设置快捷键失败：${err.message}`);
+    }
+  }
+
   function syncFloatButtonUi() {
     const menubarRow = $('menubar-entry-row');
     if (menubarRow) {
@@ -2537,6 +2792,48 @@
     });
     document.querySelectorAll('#menubar-mode-seg .seg-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.menubarMode === (state.menubarMode || 'context'));
+    });
+
+    const sc = state.shortcut || {};
+    const scEnabled = sc.enabled !== false;
+    const recBtn = $('btn-record-shortcut');
+    const kbdLbl = $('shortcut-kbd-label');
+    const recHint = $('shortcut-record-hint');
+    const toggleScBtn = $('btn-toggle-shortcut');
+    const resetScBtn = $('btn-reset-shortcut');
+    const scScopeRow = $('shortcut-scope-row');
+
+    if (recBtn) {
+      recBtn.classList.toggle('is-recording', Boolean(state.recordingShortcut));
+      recBtn.classList.toggle('is-disabled', !scEnabled && !state.recordingShortcut);
+    }
+    if (kbdLbl) {
+      setText(
+        kbdLbl,
+        state.recordingShortcut
+          ? '按下组合键…'
+          : (sc.display || sc.defaultDisplay || '⌥⌘K')
+      );
+    }
+    if (recHint) {
+      setText(
+        recHint,
+        state.recordingShortcut
+          ? 'Esc 取消'
+          : (scEnabled ? '点击修改' : '已停用')
+      );
+    }
+    if (toggleScBtn) {
+      setText(toggleScBtn, scEnabled ? '已开启' : '已停用');
+    }
+    if (resetScBtn) {
+      resetScBtn.disabled = Boolean(sc.isDefault);
+    }
+    if (scScopeRow) {
+      scScopeRow.classList.toggle('hidden', sc.nativeGlobalSupported === false);
+    }
+    document.querySelectorAll('#shortcut-scope-seg .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.shortcutScope === (sc.scope || 'app'));
     });
 
     const drawerFloatBtn = $('btn-drawer-float');
@@ -2555,22 +2852,23 @@
 
     const btn = $('btn-float');
     if (!btn) return;
+    const scHint = scEnabled && sc.display ? `；快捷键 ${sc.display}` : '';
     if (window.__CV_FLOAT_MODE__) {
       const pinned = Boolean(state.floatPinned) && !window.__CV_BROWSER_FALLBACK__;
       btn.classList.toggle('pin-active', pinned);
       const tip = window.__CV_BROWSER_FALLBACK__
-        ? formatZh('关闭右侧独立看板小窗')
+        ? formatZh(`关闭右侧独立看板小窗${scHint ? `（${sc.display}）` : ''}`)
         : pinned
-          ? formatZh('当前：已钉在屏幕最前（点击取消置顶；Shift+点击收回小窗）')
-          : formatZh('当前：已取消置顶（点击重新钉在最前；Shift+点击收回小窗）');
+          ? formatZh(`当前：已钉在屏幕最前（点击取消置顶；Shift+点击${scHint ? `或按 ${sc.display} ` : ''}收回小窗）`)
+          : formatZh(`当前：已取消置顶（点击重新钉在最前；Shift+点击${scHint ? `或按 ${sc.display} ` : ''}收回小窗）`);
       btn.title = tip;
       btn.setAttribute('aria-label', tip);
     } else {
       const active = Boolean(state.floatRunning);
       btn.classList.toggle('pin-active', active);
       const tip = active
-        ? formatZh('右侧独立置顶看板显示中（点击收回小窗）')
-        : formatZh('钉在屏幕右侧独立置顶小窗（不受右侧栏切换影响，随时可取消）');
+        ? formatZh(`右侧独立置顶看板显示中（点击或按 ${scEnabled && sc.display ? sc.display : '📌'} 收回小窗）`)
+        : formatZh(`钉在屏幕右侧独立置顶小窗（不受右侧栏切换影响${scHint}）`);
       btn.title = tip;
       btn.setAttribute('aria-label', tip);
     }
@@ -2587,6 +2885,9 @@
       }
       if (typeof res.menubarMode === 'string' && res.menubarMode) {
         state.menubarMode = res.menubarMode;
+      }
+      if (res.shortcut && typeof res.shortcut === 'object') {
+        state.shortcut = { ...state.shortcut, ...res.shortcut };
       }
       if (!window.__CV_FLOAT_MODE__ && res.floatWindow) {
         state.floatRunning = Boolean(res.floatWindow.running);
@@ -2609,6 +2910,13 @@
   window.__cvOnHostMenubarModeChange = (mode) => {
     if (mode) state.menubarMode = String(mode);
     syncFloatButtonUi();
+  };
+
+  window.__cvOnHostShortcutChange = (scPatch) => {
+    if (scPatch && typeof scPatch === 'object') {
+      state.shortcut = { ...state.shortcut, ...scPatch };
+      syncFloatButtonUi();
+    }
   };
 
   window.__cvOnHostVisibility = (visible) => {

@@ -1,10 +1,24 @@
 import Cocoa
 import WebKit
+import Carbon
 
-// Native macOS Menu Bar (`NSStatusItem`) & Right-Side Floating Window Host
+// Native macOS Menu Bar (`NSStatusItem`), Carbon HotKey & Right-Side Floating Window Host
 // for Antigravity Context & Token Viewer.
 // Communicates with `float_window.mjs` strictly over stdin/stdout JSON lines
-// (zero TCP ports, zero proxy interference, zero Local Network prompts).
+// (zero TCP ports, zero proxy interference, zero Accessibility/TCC prompts).
+
+private func carbonHotKeyHandler(
+  _ nextHandler: EventHandlerCallRef?,
+  _ event: EventRef?,
+  _ userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+  guard let ptr = userData else { return OSStatus(eventNotHandledErr) }
+  let controller = Unmanaged<FloatWindowController>.fromOpaque(ptr).takeUnretainedValue()
+  DispatchQueue.main.async {
+    controller.toggleWindowFromHotkey()
+  }
+  return noErr
+}
 
 final class FloatBridge: NSObject, WKScriptMessageHandler {
   weak var controller: FloatWindowController?
@@ -29,11 +43,44 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   var statusTitle: String
   var statusTooltip: String = "上下文与 Token 看板\n\n左键显隐看板 · 右键切换模式与置顶"
 
-  init(initialPinned: Bool, initialMenubar: Bool, initialVisible: Bool, initialMode: String) {
+  var isShortcutEnabled: Bool
+  var shortcutKeyCode: Int
+  var shortcutModifiers: Int
+  var shortcutLabel: String
+  var shortcutScope: String
+  var isRecordingShortcut: Bool = false
+  var hotKeyRef: EventHotKeyRef?
+  var registeredKeyCode: Int = -1
+  var registeredModifiers: Int = -1
+  var eventHandlerRef: EventHandlerRef?
+  var workspaceObserver: NSObjectProtocol?
+  var lastExternalApp: NSRunningApplication?
+  var lastHotkeyAt: TimeInterval = 0
+
+  var shouldStayResident: Bool {
+    return isMenubarEnabled || isShortcutEnabled
+  }
+
+  init(
+    initialPinned: Bool,
+    initialMenubar: Bool,
+    initialVisible: Bool,
+    initialMode: String,
+    initialShortcutEnabled: Bool,
+    initialShortcutKeyCode: Int,
+    initialShortcutModifiers: Int,
+    initialShortcutLabel: String,
+    initialShortcutScope: String
+  ) {
     self.isPinned = initialPinned
     self.isMenubarEnabled = initialMenubar
     self.isWindowVisible = initialVisible
     self.menubarMode = initialMode
+    self.isShortcutEnabled = initialShortcutEnabled
+    self.shortcutKeyCode = initialShortcutKeyCode
+    self.shortcutModifiers = initialShortcutModifiers
+    self.shortcutLabel = initialShortcutLabel
+    self.shortcutScope = (initialShortcutScope == "global") ? "global" : "app"
     switch initialMode {
     case "speed":
       self.statusTitle = "⚡ --t/s"
@@ -138,6 +185,7 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
 
     applyPinnedState(isPinned, notifyWeb: false)
     applyMenubarState(isMenubarEnabled, notifyWeb: false)
+    setupHotKeyMonitor()
 
     if isWindowVisible {
       showWindow(notifyParent: false)
@@ -149,8 +197,118 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
       "pinned": isPinned,
       "menubarEnabled": isMenubarEnabled,
       "menubarMode": menubarMode,
+      "shortcutEnabled": isShortcutEnabled,
+      "shortcutScope": shortcutScope,
       "windowVisible": isWindowVisible
     ])
+  }
+
+  // MARK: - Carbon HotKey & Scope Tracking
+
+  func setupHotKeyMonitor() {
+    var eventType = EventTypeSpec(
+      eventClass: OSType(kEventClassKeyboard),
+      eventKind: UInt32(kEventHotKeyPressed)
+    )
+    InstallEventHandler(
+      GetApplicationEventTarget(),
+      carbonHotKeyHandler,
+      1,
+      &eventType,
+      Unmanaged.passUnretained(self).toOpaque(),
+      &eventHandlerRef
+    )
+
+    if let front = NSWorkspace.shared.frontmostApplication,
+       front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+      lastExternalApp = front
+    }
+
+    workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didActivateApplicationNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] note in
+      guard let self = self else { return }
+      let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+      if let ext = activated, ext.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+        self.lastExternalApp = ext
+        if self.isRecordingShortcut {
+          self.isRecordingShortcut = false
+        }
+      }
+      self.syncHotKeyRegistration(frontApp: activated ?? NSWorkspace.shared.frontmostApplication)
+    }
+
+    syncHotKeyRegistration()
+  }
+
+  func isAllowedFrontApp(_ app: NSRunningApplication?) -> Bool {
+    guard let front = app else { return false }
+    if front.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+      return true
+    }
+    let name = (front.localizedName ?? "").lowercased()
+    let bundle = (front.bundleIdentifier ?? "").lowercased()
+    let execPath = (front.executableURL?.path ?? "").lowercased()
+    return name.contains("antigravity") || bundle.contains("antigravity") || execPath.contains("antigravity")
+  }
+
+  func unregisterHotKeyIfNeeded() {
+    if let ref = hotKeyRef {
+      UnregisterEventHotKey(ref)
+      hotKeyRef = nil
+    }
+    registeredKeyCode = -1
+    registeredModifiers = -1
+  }
+
+  func syncHotKeyRegistration(frontApp: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
+    let allowedByScope = (shortcutScope == "global") || isAllowedFrontApp(frontApp)
+    let wantRegistered = isShortcutEnabled && !isRecordingShortcut && shortcutKeyCode >= 0 && allowedByScope
+    if !wantRegistered {
+      unregisterHotKeyIfNeeded()
+      return
+    }
+    if hotKeyRef != nil && registeredKeyCode == shortcutKeyCode && registeredModifiers == shortcutModifiers {
+      return
+    }
+    unregisterHotKeyIfNeeded()
+    let hotKeyID = EventHotKeyID(signature: OSType(0x4356484B), id: 1)
+    var newRef: EventHotKeyRef? = nil
+    let status = RegisterEventHotKey(
+      UInt32(shortcutKeyCode),
+      UInt32(shortcutModifiers),
+      hotKeyID,
+      GetApplicationEventTarget(),
+      0,
+      &newRef
+    )
+    if status == noErr, let validRef = newRef {
+      hotKeyRef = validRef
+      registeredKeyCode = shortcutKeyCode
+      registeredModifiers = shortcutModifiers
+    }
+  }
+
+  func toggleWindowFromHotkey() {
+    let now = ProcessInfo.processInfo.systemUptime
+    if now - lastHotkeyAt < 0.14 { return }
+    lastHotkeyAt = now
+
+    if !window.isVisible || (!isPinned && !NSApp.isActive) {
+      if let front = NSWorkspace.shared.frontmostApplication,
+         front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+        lastExternalApp = front
+      }
+      showWindow(notifyParent: true)
+    } else {
+      let wasActive = NSApp.isActive
+      hideWindow(notifyParent: true)
+      if wasActive, let prev = lastExternalApp, !prev.isTerminated {
+        prev.activate(options: [])
+      }
+    }
   }
 
   // MARK: - Menu Bar (`NSStatusItem`)
@@ -189,8 +347,9 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     let isRightClick = (ev?.type == .rightMouseUp) || (ev?.modifierFlags.contains(.control) == true)
     if isRightClick {
       let menu = NSMenu()
+      let scSuffix = (isShortcutEnabled && !shortcutLabel.isEmpty) ? " (\(shortcutLabel))" : ""
       let toggleItem = NSMenuItem(
-        title: window.isVisible ? "隐藏右侧看板小窗" : "弹出右侧看板小窗",
+        title: (window.isVisible ? "隐藏右侧看板小窗" : "弹出右侧看板小窗") + scSuffix,
         action: #selector(toggleWindowAction),
         keyEquivalent: ""
       )
@@ -286,12 +445,13 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   @objc func disableMenubarFromMenuAction() {
     applyMenubarState(false, notifyWeb: true)
     emitJson(["type": "userDisabledMenubar", "windowVisible": window.isVisible])
-    if !window.isVisible {
+    if !window.isVisible && !shouldStayResident {
       NSApp.terminate(nil)
     }
   }
 
   @objc func quitAction() {
+    unregisterHotKeyIfNeeded()
     emitJson(["type": "closed"])
     NSApp.terminate(nil)
   }
@@ -303,6 +463,7 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
     isWindowVisible = true
+    syncHotKeyRegistration()
     webView?.evaluateJavaScript("window.__cvOnHostVisibility && window.__cvOnHostVisibility(true);", completionHandler: nil)
     if notifyParent {
       emitJson(["type": "visibilityChanged", "windowVisible": true])
@@ -310,8 +471,12 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   }
 
   func hideWindow(notifyParent: Bool = true) {
+    if isRecordingShortcut {
+      isRecordingShortcut = false
+    }
     window.orderOut(nil)
     isWindowVisible = false
+    syncHotKeyRegistration()
     webView?.evaluateJavaScript("window.__cvOnHostVisibility && window.__cvOnHostVisibility(false);", completionHandler: nil)
     if notifyParent {
       emitJson(["type": "visibilityChanged", "windowVisible": false])
@@ -319,9 +484,10 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   }
 
   @objc func hideWindowAction() {
-    if isMenubarEnabled {
+    if shouldStayResident {
       hideWindow(notifyParent: true)
     } else {
+      unregisterHotKeyIfNeeded()
       emitJson(["type": "closed"])
       NSApp.terminate(nil)
     }
@@ -329,6 +495,10 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
 
   @objc func toggleWindowAction() {
     if !window.isVisible || (!isPinned && !NSApp.isActive) {
+      if let front = NSWorkspace.shared.frontmostApplication,
+         front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+        lastExternalApp = front
+      }
       showWindow(notifyParent: true)
     } else {
       hideWindow(notifyParent: true)
@@ -360,10 +530,11 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
   }
 
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    if isMenubarEnabled {
+    if shouldStayResident {
       hideWindow(notifyParent: true)
       return false
     } else {
+      unregisterHotKeyIfNeeded()
       emitJson(["type": "closed"])
       NSApp.terminate(nil)
       return true
@@ -380,6 +551,9 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     if kind == "togglePin" {
       let next = (obj["pinned"] as? Bool) ?? (!isPinned)
       applyPinnedState(next, notifyWeb: true)
+    } else if kind == "setShortcutRecording" {
+      isRecordingShortcut = (obj["recording"] as? Bool) ?? false
+      syncHotKeyRegistration()
     } else if kind == "closeWindow" {
       hideWindowAction()
     } else if kind == "rpc" {
@@ -443,7 +617,40 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
         menubarMode = m
       }
       applyMenubarState(en, title: msg["title"] as? String, tooltip: msg["tooltip"] as? String, notifyWeb: true)
-      if !en && !window.isVisible {
+      if !shouldStayResident && !window.isVisible {
+        unregisterHotKeyIfNeeded()
+        emitJson(["type": "closed"])
+        NSApp.terminate(nil)
+      }
+    case "setShortcut":
+      if let en = msg["enabled"] as? Bool {
+        isShortcutEnabled = en
+      }
+      if let kc = msg["keyCode"] as? Int {
+        shortcutKeyCode = kc
+      }
+      if let mods = msg["modifiers"] as? Int {
+        shortcutModifiers = mods
+      }
+      if let lbl = msg["label"] as? String {
+        shortcutLabel = lbl
+      }
+      if let sc = msg["scope"] as? String {
+        shortcutScope = (sc == "global") ? "global" : "app"
+      }
+      isRecordingShortcut = false
+      syncHotKeyRegistration()
+      if let scJsonData = try? JSONSerialization.data(withJSONObject: [
+        "enabled": isShortcutEnabled,
+        "accelerator": (msg["accelerator"] as? String) ?? "",
+        "display": shortcutLabel,
+        "scope": shortcutScope
+      ], options: []), let scJson = String(data: scJsonData, encoding: .utf8) {
+        let js = "window.__cvOnHostShortcutChange && window.__cvOnHostShortcutChange(\(scJson));"
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+      }
+      if !shouldStayResident && !window.isVisible {
+        unregisterHotKeyIfNeeded()
         emitJson(["type": "closed"])
         NSApp.terminate(nil)
       }
@@ -480,6 +687,7 @@ final class FloatWindowController: NSObject, NSApplicationDelegate, NSWindowDele
     case "toggleWindow":
       toggleWindowAction()
     case "quit":
+      unregisterHotKeyIfNeeded()
       NSApp.terminate(nil)
     default:
       break
@@ -499,6 +707,27 @@ if let idx = args.firstIndex(of: "--mode"), idx + 1 < args.count {
   }
 }
 
+let initialShortcutEnabled = !args.contains("--no-shortcut")
+var initialShortcutKeyCode = Int(kVK_ANSI_K)
+if let idx = args.firstIndex(of: "--shortcut-keycode"), idx + 1 < args.count, let v = Int(args[idx + 1]) {
+  initialShortcutKeyCode = v
+}
+var initialShortcutModifiers = Int(cmdKey | optionKey)
+if let idx = args.firstIndex(of: "--shortcut-mods"), idx + 1 < args.count, let v = Int(args[idx + 1]) {
+  initialShortcutModifiers = v
+}
+var initialShortcutLabel = "⌥⌘K"
+if let idx = args.firstIndex(of: "--shortcut-label"), idx + 1 < args.count {
+  initialShortcutLabel = args[idx + 1]
+}
+var initialShortcutScope = "app"
+if let idx = args.firstIndex(of: "--shortcut-scope"), idx + 1 < args.count {
+  let sc = args[idx + 1]
+  if sc == "app" || sc == "global" {
+    initialShortcutScope = sc
+  }
+}
+
 let app = NSApplication.shared
 // `.accessory` keeps the user's Dock uncluttered while rendering StatusItem + floating window
 app.setActivationPolicy(.accessory)
@@ -506,7 +735,12 @@ let delegate = FloatWindowController(
   initialPinned: initialPinned,
   initialMenubar: initialMenubar,
   initialVisible: initialVisible,
-  initialMode: initialMode
+  initialMode: initialMode,
+  initialShortcutEnabled: initialShortcutEnabled,
+  initialShortcutKeyCode: initialShortcutKeyCode,
+  initialShortcutModifiers: initialShortcutModifiers,
+  initialShortcutLabel: initialShortcutLabel,
+  initialShortcutScope: initialShortcutScope
 )
 app.delegate = delegate
 app.run()

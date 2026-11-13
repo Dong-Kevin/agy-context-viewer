@@ -95,8 +95,9 @@ Zero client binary patching, zero external runtime dependencies, and 100% local 
     3. **5-Hour / Weekly Quota Remaining**: `⏳ 5h 99%·周93%`
   - **Automatic Conversation Follow**: Clicking any conversation in the Antigravity sidebar (including idle historical threads without sending a new message) automatically syncs the Menu Bar badge and floating window within `~1.5s`. Manual session locking is also supported via the dropdown selector.
   - **Compact 4-Section Hover Tooltip & `<5ms` Toggle**: Hover for a clean summary of active conversation/model, context & speed stats, `5h + Weekly` model pool quotas, and shortcuts; **left-click** toggles the dashboard window in `<5ms`, and **right-click** opens the native quick-switch menu.
-- **Right-Side Pinned Floating Window (`📌`)**
-  - Pin the dashboard directly to the right edge of your screen so it remains visible even when the IDE's right Auxiliary Pane is displaying Artifacts, Diffs, or Terminals. Toggle always-on-top anytime via the title bar pill, the `📌` toolbar icon, or `Cmd+Shift+P` (`Cmd+W` to hide).
+- **Right-Side Pinned Floating Window (`📌`) & Customizable Toggle Shortcut (`⌥⌘K`)**
+  - Pin the dashboard directly to the right edge of your screen so it remains visible even when the IDE's right Auxiliary Pane is displaying Artifacts, Diffs, or Terminals. On macOS, press **`⌥⌘K`** anytime while Antigravity or the dashboard is focused to open or close the docked panel in `<5ms` (**zero macOS Accessibility TCC permission prompt**, customizable via click-to-record in the palette drawer or `agy-context shortcut`, with optional global scope).
+  - Toggle always-on-top anytime via the title bar pill, the `📌` toolbar icon, or `Cmd+Shift+P` (`⌥⌘K` or `Cmd+W` to hide).
 - **Dual-Window Quota Pools (`5h + Weekly`) & Realistic Subscription Modeling**
   - Queries both read-only `GetUserStatus` and `RetrieveUserQuotaSummary` local language-server RPCs to display **5-hour rolling burst limits** alongside **Weekly shared tier pools** and exact reset timestamps for Gemini and Claude / GPT families.
   - Accurately identifies `Google AI Pro` and `Google AI Ultra` tiers, and includes built-in customization for **Family Group Sharing (`$0` extra cost)**, **Family Split-Billing (AA)**, **22 regional pricing presets**, and **40+ currencies**, side-by-side with retail API pay-as-you-go equivalence.
@@ -155,9 +156,10 @@ Or download `context-viewer-v1.6.3.zip` and `context-viewer-v1.6.3.zip.sha256` f
    - **Left-click** the top-right menu bar badge to show or hide the floating dashboard in `<5ms`;
    - **Right-click** the badge to switch live display modes (**Context % / Speed & Duration / 5h & Weekly Quota**), toggle window pin state, or hide the menu bar icon;
    - You can also configure everything visually inside the dashboard's top-right palette customizer drawer.
-2. **Right-Side Pinned Floating Window (`📌`)**
-   - Click the **`📌` button** in the dashboard header or run `agy-context float` in your terminal to pin the dashboard on the right side of your screen;
-   - Click the title-bar `📌` pill (or press `Cmd+Shift+P`) to toggle always-on-top; press `Cmd+W`, left-click the menu bar badge again, or run `agy-context float close` to dismiss.
+2. **Right-Side Pinned Floating Window (`📌`) & Toggle Shortcut (`⌥⌘K`)**
+   - Press **`⌥⌘K`** on macOS (`Ctrl+Alt+K` inside the dashboard on Windows / Linux), click the **`📌` button** in the dashboard header, or run `agy-context float` in your terminal to open or close the right-side panel;
+   - Open the top-right palette drawer to click-and-record any custom key chord, switch between **Host App Only** (default, conflict-free) and **Global** scope, or reset / disable the shortcut;
+   - Click the title-bar `📌` pill (or press `Cmd+Shift+P`) to toggle always-on-top; press `⌥⌘K` again, `Cmd+W`, left-click the menu bar badge, or run `agy-context float close` to dismiss.
 3. **Embedded Auxiliary Pane Sidecar**
    - Ensure the plugin is enabled under **Customizations → Plugins**, then click its icon in the right Auxiliary Pane (or open `sidecar://context-viewer/dashboard/`).
 
@@ -173,6 +175,7 @@ agy-context menubar speed    # Menu Bar mode: Latest Speed & Duration (⚡ 46t/s
 agy-context menubar quota    # Menu Bar mode: 5h / Weekly Quota Remaining (⏳ 5h 99%·周93%)
 agy-context menubar off      # Hide Menu Bar badge (pass 'on' to re-enable, 'status' to inspect)
 agy-context float            # Open / toggle the right-side pinned floating window ('close' to hide, 'quit' to stop daemon)
+agy-context shortcut         # View or customize the panel toggle shortcut (e.g. 'opt+cmd+l', 'reset', 'off', '--global')
 agy-context turns            # Inspect the last 20 turns with context ±Delta, cache hit %, and tool calls
 agy-context json             # Structured JSON summary (append --full for complete raw telemetry payload)
 agy-context web              # Start standalone local web UI on 127.0.0.1:18970 and open in default browser

@@ -628,6 +628,358 @@ function getSidecarManifestPath() {
 }
 
 export const MENUBAR_MODES = ['context', 'speed', 'quota'];
+export const DEFAULT_SHORTCUT_MAC = 'Alt+Meta+K';
+export const DEFAULT_SHORTCUT_OTHER = 'Ctrl+Alt+K';
+export const SHORTCUT_SCOPES = ['app', 'global'];
+
+// Exact macOS Carbon HIToolbox virtual keycodes (<Carbon/HIToolbox/Events.h>)
+const MAC_CARBON_KEYCODES = Object.freeze({
+  A: 0, B: 11, C: 8, D: 2, E: 14, F: 3, G: 5, H: 4, I: 34, J: 38,
+  K: 40, L: 37, M: 46, N: 45, O: 31, P: 35, Q: 12, R: 15, S: 1, T: 17,
+  U: 32, V: 9, W: 13, X: 7, Y: 16, Z: 6,
+  '0': 29, '1': 18, '2': 19, '3': 20, '4': 21,
+  '5': 23, '6': 22, '7': 26, '8': 28, '9': 25,
+  F1: 122, F2: 120, F3: 99, F4: 118, F5: 96, F6: 97,
+  F7: 98, F8: 100, F9: 101, F10: 109, F11: 103, F12: 111,
+  Space: 49,
+  Backquote: 50,
+  Minus: 27,
+  Equal: 24,
+  BracketLeft: 33,
+  BracketRight: 30,
+  Backslash: 42,
+  Semicolon: 41,
+  Quote: 39,
+  Comma: 43,
+  Period: 47,
+  Slash: 44
+});
+
+const MAC_CARBON_MODS = Object.freeze({
+  Meta: 256,   // cmdKey
+  Shift: 512,  // shiftKey
+  Alt: 2048,   // optionKey
+  Ctrl: 4096   // controlKey
+});
+
+const SHORTCUT_KEY_DISPLAY = Object.freeze({
+  Space: 'Space',
+  Backquote: '`',
+  Minus: '-',
+  Equal: '=',
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  Semicolon: ';',
+  Quote: "'",
+  Comma: ',',
+  Period: '.',
+  Slash: '/'
+});
+
+const SHORTCUT_KEY_ALIASES = Object.freeze({
+  space: 'Space',
+  spacebar: 'Space',
+  '`': 'Backquote',
+  '~': 'Backquote',
+  backquote: 'Backquote',
+  grave: 'Backquote',
+  tilde: 'Backquote',
+  '-': 'Minus',
+  '_': 'Minus',
+  minus: 'Minus',
+  '=': 'Equal',
+  equal: 'Equal',
+  plus: 'Equal',
+  '[': 'BracketLeft',
+  '{': 'BracketLeft',
+  bracketleft: 'BracketLeft',
+  ']': 'BracketRight',
+  '}': 'BracketRight',
+  bracketright: 'BracketRight',
+  '\\': 'Backslash',
+  '|': 'Backslash',
+  backslash: 'Backslash',
+  ';': 'Semicolon',
+  ':': 'Semicolon',
+  semicolon: 'Semicolon',
+  "'": 'Quote',
+  '"': 'Quote',
+  quote: 'Quote',
+  ',': 'Comma',
+  '<': 'Comma',
+  comma: 'Comma',
+  '.': 'Period',
+  '>': 'Period',
+  period: 'Period',
+  dot: 'Period',
+  '/': 'Slash',
+  '?': 'Slash',
+  slash: 'Slash'
+});
+
+const RESERVED_MAC_META_ONLY_KEYS = new Set([
+  'A', 'C', 'F', 'H', 'M', 'N', 'Q', 'R', 'S', 'T', 'V', 'W', 'X', 'Z', 'Space'
+]);
+const RESERVED_OTHER_CTRL_ONLY_KEYS = new Set(['A', 'C', 'V', 'W', 'X', 'Z']);
+
+export function getDefaultShortcut(platform = process.platform) {
+  return platform === 'darwin' ? DEFAULT_SHORTCUT_MAC : DEFAULT_SHORTCUT_OTHER;
+}
+
+function canonicalizeKeyToken(rawToken) {
+  const trimmed = String(rawToken || '').trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (SHORTCUT_KEY_ALIASES[lower]) return SHORTCUT_KEY_ALIASES[lower];
+  if (/^key([a-z])$/i.test(trimmed)) return trimmed.slice(3).toUpperCase();
+  if (/^[a-z]$/i.test(trimmed)) return trimmed.toUpperCase();
+  if (/^digit([0-9])$/i.test(trimmed)) return trimmed.slice(5);
+  if (/^[0-9]$/.test(trimmed)) return trimmed;
+  if (/^f([1-9]|1[0-2])$/i.test(trimmed)) return trimmed.toUpperCase();
+  return null;
+}
+
+export function formatShortcutDisplay(spec, platform = process.platform) {
+  const raw = String(spec || '').trim();
+  if (!raw || /^(off|none|disabled?)$/i.test(raw)) return '已关闭';
+  const parts = raw.split('+').filter(Boolean);
+  if (!parts.length) return '已关闭';
+  const keyPart = parts[parts.length - 1];
+  const modSet = new Set(parts.slice(0, -1));
+  const keyLabel = SHORTCUT_KEY_DISPLAY[keyPart] || keyPart;
+  if (platform === 'darwin') {
+    let out = '';
+    if (modSet.has('Ctrl')) out += '⌃';
+    if (modSet.has('Alt')) out += '⌥';
+    if (modSet.has('Shift')) out += '⇧';
+    if (modSet.has('Meta')) out += '⌘';
+    return `${out}${keyLabel}`;
+  }
+  const mods = [];
+  if (modSet.has('Ctrl')) mods.push('Ctrl');
+  if (modSet.has('Alt')) mods.push('Alt');
+  if (modSet.has('Shift')) mods.push('Shift');
+  if (modSet.has('Meta')) mods.push(platform === 'win32' ? 'Win' : 'Super');
+  return [...mods, keyLabel].join('+');
+}
+
+export function shortcutToMacCarbon(spec) {
+  const raw = String(spec || '').trim();
+  if (!raw) return null;
+  const parts = raw.split('+').filter(Boolean);
+  if (!parts.length) return null;
+  const keyPart = parts[parts.length - 1];
+  const keyCode = MAC_CARBON_KEYCODES[keyPart];
+  if (typeof keyCode !== 'number') return null;
+  let modifiers = 0;
+  for (const mod of parts.slice(0, -1)) {
+    if (MAC_CARBON_MODS[mod]) {
+      modifiers |= MAC_CARBON_MODS[mod];
+    }
+  }
+  return { keyCode, modifiers };
+}
+
+export function normalizeShortcutSpec(raw, platform = process.platform) {
+  const str = String(raw ?? '').trim();
+  if (!str) {
+    return { ok: false, error: '快捷键不能为空' };
+  }
+  if (/^(off|none|disable|disabled)$/i.test(str)) {
+    return {
+      ok: true,
+      disabled: true,
+      accelerator: '',
+      display: '已关闭',
+      modifiers: { ctrl: false, alt: false, shift: false, meta: false },
+      key: '',
+      macCarbon: null
+    };
+  }
+
+  // Expand compact macOS modifier symbols (e.g. `⌥⌘K` or `⌃⇧L`) before splitting
+  const expanded = str
+    .replace(/⌃/g, 'Ctrl+')
+    .replace(/⌥/g, 'Alt+')
+    .replace(/⇧/g, 'Shift+')
+    .replace(/⌘/g, 'Meta+')
+    .replace(/\+\s*\+$/g, '+Equal');
+
+  const rawTokens = expanded.split('+').map((t) => t.trim()).filter(Boolean);
+  const mods = { ctrl: false, alt: false, shift: false, meta: false };
+  const keys = [];
+
+  for (const tok of rawTokens) {
+    const low = tok.toLowerCase();
+    if (['ctrl', 'control', 'ctl'].includes(low)) {
+      mods.ctrl = true;
+    } else if (['alt', 'opt', 'option'].includes(low)) {
+      mods.alt = true;
+    } else if (['shift', 'shft'].includes(low)) {
+      mods.shift = true;
+    } else if (['meta', 'cmd', 'command', 'super', 'win'].includes(low)) {
+      mods.meta = true;
+    } else {
+      const canonKey = canonicalizeKeyToken(tok);
+      if (!canonKey) {
+        return {
+          ok: false,
+          error: `不支持的按键「${tok}」，请使用字母 A-Z、数字 0-9、F1-F12 或常用符号键`
+        };
+      }
+      keys.push(canonKey);
+    }
+  }
+
+  if (keys.length === 0) {
+    return {
+      ok: false,
+      error: '请按下包含修饰键（如 ⌘ / ⌥ / ⌃）与单个主键的组合键'
+    };
+  }
+  if (keys.length > 1) {
+    return {
+      ok: false,
+      error: '快捷键只能包含一个主键，请使用「修饰键 + 单个按键」组合'
+    };
+  }
+
+  const key = keys[0];
+  const isFunctionKey = /^F([1-9]|1[0-2])$/.test(key);
+  const hasPrimaryMod = mods.ctrl || mods.alt || mods.meta;
+  if (!hasPrimaryMod && !isFunctionKey) {
+    return {
+      ok: false,
+      error: '快捷键需至少包含 ⌘ / ⌥ / ⌃ 修饰键之一（或使用 F1-F12），避免干扰正常文字输入'
+    };
+  }
+
+  if (platform === 'darwin') {
+    const onlyMeta = mods.meta && !mods.alt && !mods.ctrl && !mods.shift;
+    const onlyMetaShift = mods.meta && mods.shift && !mods.alt && !mods.ctrl;
+    if ((onlyMeta && RESERVED_MAC_META_ONLY_KEYS.has(key)) || (onlyMetaShift && key === 'Z')) {
+      return {
+        ok: false,
+        error: '该组合键为系统保留或基础编辑快捷键（如复制/粘贴/退出），请换用带 ⌥ 或 ⌃ 的组合（如 ⌥⌘K）'
+      };
+    }
+  } else {
+    const onlyCtrl = mods.ctrl && !mods.alt && !mods.meta && !mods.shift;
+    if (onlyCtrl && RESERVED_OTHER_CTRL_ONLY_KEYS.has(key)) {
+      return {
+        ok: false,
+        error: '该组合键为基础编辑快捷键（如复制/粘贴/撤销），请换用 Ctrl+Alt 组合（如 Ctrl+Alt+K）'
+      };
+    }
+  }
+
+  const orderedParts = [];
+  if (mods.ctrl) orderedParts.push('Ctrl');
+  if (mods.alt) orderedParts.push('Alt');
+  if (mods.shift) orderedParts.push('Shift');
+  if (mods.meta) orderedParts.push('Meta');
+  orderedParts.push(key);
+  const accelerator = orderedParts.join('+');
+
+  return {
+    ok: true,
+    disabled: false,
+    accelerator,
+    display: formatShortcutDisplay(accelerator, platform),
+    modifiers: mods,
+    key,
+    macCarbon: shortcutToMacCarbon(accelerator)
+  };
+}
+
+export function getShortcutConfig(platform = process.platform) {
+  const settings = loadRawSettings();
+  const prefs = settings.uiPreferences || {};
+  const defaultAccelerator = getDefaultShortcut(platform);
+  const defaultDisplay = formatShortcutDisplay(defaultAccelerator, platform);
+  const enabled = typeof prefs.shortcutEnabled === 'boolean' ? prefs.shortcutEnabled : true;
+  const scope = SHORTCUT_SCOPES.includes(prefs.shortcutScope) ? prefs.shortcutScope : 'app';
+
+  let accelerator = defaultAccelerator;
+  if (typeof prefs.shortcutAccelerator === 'string' && prefs.shortcutAccelerator.trim()) {
+    const parsed = normalizeShortcutSpec(prefs.shortcutAccelerator, platform);
+    if (parsed.ok && !parsed.disabled) {
+      accelerator = parsed.accelerator;
+    }
+  }
+  const display = formatShortcutDisplay(accelerator, platform);
+
+  return {
+    enabled,
+    accelerator,
+    display,
+    defaultAccelerator,
+    defaultDisplay,
+    isDefault: enabled === true && accelerator === defaultAccelerator && scope === 'app',
+    scope,
+    nativeGlobalSupported: platform === 'darwin',
+    macCarbon: shortcutToMacCarbon(accelerator)
+  };
+}
+
+export function setShortcutConfig(patch = {}, platform = process.platform) {
+  const settings = loadRawSettings();
+  const prevPrefs = settings.uiPreferences || {};
+  const cur = getShortcutConfig(platform);
+
+  let nextEnabled = cur.enabled;
+  let nextAccelerator = cur.accelerator;
+  let nextScope = cur.scope;
+
+  if (patch.reset === true || patch.shortcutReset === true) {
+    nextEnabled = true;
+    nextAccelerator = getDefaultShortcut(platform);
+    nextScope = 'app';
+  } else {
+    const rawAcc = patch.accelerator ?? patch.shortcutAccelerator;
+    if (rawAcc !== undefined) {
+      const parsed = normalizeShortcutSpec(rawAcc, platform);
+      if (!parsed.ok) {
+        return { ok: false, error: parsed.error, shortcut: cur };
+      }
+      if (parsed.disabled) {
+        nextEnabled = false;
+      } else {
+        nextAccelerator = parsed.accelerator;
+        if (typeof patch.enabled !== 'boolean' && typeof patch.shortcutEnabled !== 'boolean') {
+          nextEnabled = true;
+        }
+      }
+    }
+
+    const rawEnabled = typeof patch.enabled === 'boolean'
+      ? patch.enabled
+      : (typeof patch.shortcutEnabled === 'boolean' ? patch.shortcutEnabled : undefined);
+    if (typeof rawEnabled === 'boolean') {
+      nextEnabled = rawEnabled;
+    }
+
+    const rawScope = patch.scope ?? patch.shortcutScope;
+    if (rawScope !== undefined) {
+      const normScope = String(rawScope).trim().toLowerCase();
+      if (!SHORTCUT_SCOPES.includes(normScope)) {
+        return { ok: false, error: '无效的快捷键生效范围（仅支持 app 或 global）', shortcut: cur };
+      }
+      nextScope = normScope;
+    }
+  }
+
+  settings.uiPreferences = {
+    ...prevPrefs,
+    shortcutEnabled: nextEnabled,
+    shortcutAccelerator: nextAccelerator,
+    shortcutScope: nextScope,
+    updatedAt: new Date().toISOString()
+  };
+  writeJsonAtomic(getSettingsPath(), settings);
+  return { ok: true, shortcut: getShortcutConfig(platform) };
+}
 
 export function getMenubarPreference() {
   const settings = loadRawSettings();
@@ -723,6 +1075,7 @@ export function getSidebarEntryStatus() {
     menubarEnabled: getMenubarPreference(),
     menubarMode: getMenubarMode(),
     menubarSupported: process.platform === 'darwin',
+    shortcut: getShortcutConfig(),
     pinnedConvId: hint.pinnedConvId || '',
     sidebarEnabled,
     viewsCount: views.length

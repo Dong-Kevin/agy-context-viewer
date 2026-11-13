@@ -158,7 +158,7 @@ ok "安装完成！版本：$(node -p 'require(process.argv[1]).version' "${TARG
 echo ""
 printf "  • \033[1mAntigravity 桌面端 / IDE\033[0m：\n"
 printf "    1) 顶部菜单栏秒开（macOS 默认开启，切换会话自动跟随）：单击右上角图标秒开或收回看板，右键或用 \033[36magy-context menubar [context|speed|quota|off]\033[0m 定制显示内容；\n"
-printf "    2) 右侧独立置顶小窗：运行 \033[36magy-context float\033[0m（或点击面板内 📌 按钮），可将看板钉在屏幕右侧最前；\n"
+printf "    2) 右侧独立看板与快捷键：在宿主前台按 \033[36m⌥⌘K\033[0m 一键打开或收回右侧看板（可用面板设置或 \033[36magy-context shortcut\033[0m 自定义），或运行 \033[36magy-context float\033[0m；\n"
 printf "    3) 内嵌侧边栏：在 Customizations → Plugins 开启「上下文与 Token 看板」，点击右侧栏图标或 \033[36msidecar://%s/dashboard/\033[0m 即可打开。\n\n" "${PLUGIN_DIR_NAME}"
 printf "  • \033[1magy CLI / 终端用户\033[0m：\n"
 printf "    1) 在 agy 对话中直接输入 \033[36m/context-viewer\033[0m 查看当前会话水位与费用；\n"

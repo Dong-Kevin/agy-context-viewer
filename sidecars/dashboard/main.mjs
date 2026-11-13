@@ -88,10 +88,22 @@ function createHandlers(getDefaultConvId, makeResponse) {
         menubarMode: fw.menubarMode || getMenubarMode(),
         menubarActive: fw.menubarActive,
         menubarSupported: fw.menubarSupported,
+        shortcut: fw.shortcut,
+        shortcutActive: fw.shortcutActive,
         floatWindow: fw
       };
     },
     apiEntrypointsControl: async (data = {}) => {
+      const isShortcutUpdate = (
+        data.target === 'shortcut' ||
+        data.shortcutReset === true ||
+        data.reset === true ||
+        data.accelerator !== undefined ||
+        data.shortcutAccelerator !== undefined ||
+        typeof data.shortcutEnabled === 'boolean' ||
+        data.shortcutScope !== undefined ||
+        data.scope !== undefined
+      );
       const hasSessionHint = typeof data.pinnedConvId === 'string' || typeof data.activeHostConvId === 'string';
       if (hasSessionHint) {
         updateActiveSessionHint({
@@ -101,6 +113,7 @@ function createHandlers(getDefaultConvId, makeResponse) {
         });
         await controlFloatWindow({ action: 'refresh-session' }).catch(() => {});
         if (
+          !isShortcutUpdate &&
           typeof data.menubarEnabled !== 'boolean' &&
           typeof data.menubarMode !== 'string' &&
           typeof data.sidebarEnabled !== 'boolean' &&
@@ -113,9 +126,26 @@ function createHandlers(getDefaultConvId, makeResponse) {
             menubarMode: fw.menubarMode || getMenubarMode(),
             menubarActive: fw.menubarActive,
             menubarSupported: fw.menubarSupported,
+            shortcut: fw.shortcut,
+            shortcutActive: fw.shortcutActive,
             floatWindow: fw
           };
         }
+      }
+
+      if (isShortcutUpdate) {
+        const res = await controlFloatWindow({
+          action: 'set-shortcut',
+          enabled: typeof data.enabled === 'boolean' ? data.enabled : data.shortcutEnabled,
+          accelerator: data.accelerator ?? data.shortcutAccelerator,
+          scope: data.scope ?? data.shortcutScope,
+          reset: Boolean(data.reset || data.shortcutReset)
+        });
+        return {
+          ...getSidebarEntryStatus(),
+          ...res,
+          floatWindow: getFloatWindowStatus()
+        };
       }
 
       if (typeof data.menubarMode === 'string' || data.target === 'menubar-mode') {

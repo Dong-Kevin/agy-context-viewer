@@ -35,6 +35,7 @@ import {
   getMenubarPreference,
   getPluginStateDir,
   getSettings,
+  getShortcutConfig,
   getSidebarEntryStatus,
   guardLoopbackRequest,
   injectCsrfMeta,
@@ -46,12 +47,13 @@ import {
   scanConversation,
   setMenubarMode,
   setMenubarPreference,
+  setShortcutConfig,
   setSidebarEntrypoint,
   updateActiveSessionHint
 } from './collector.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const DAEMON_VERSION = 5;
+export const DAEMON_VERSION = 6;
 const DAEMON_RUNTIME_FILES = [
   'pricing.mjs',
   'collector.mjs',
@@ -168,6 +170,7 @@ export function getFloatWindowStatus(platform = process.platform) {
   const menubarSupported = platform === 'darwin';
   const prefMenubar = menubarSupported ? getMenubarPreference() : false;
   const prefMode = getMenubarMode();
+  const shortcut = getShortcutConfig(platform);
   if (!st) {
     return {
       ok: true,
@@ -179,6 +182,9 @@ export function getFloatWindowStatus(platform = process.platform) {
       menubarMode: prefMode,
       menubarActive: false,
       menubarSupported,
+      shortcutEnabled: shortcut.enabled,
+      shortcutActive: false,
+      shortcut,
       statusTitle: null,
       activeConvId: null,
       activeConvTitle: null,
@@ -186,6 +192,7 @@ export function getFloatWindowStatus(platform = process.platform) {
     };
   }
   const windowVisible = st.windowVisible !== undefined ? Boolean(st.windowVisible) : Boolean(st.running);
+  const shortcutEnabled = st.shortcutEnabled !== undefined ? Boolean(st.shortcutEnabled) : shortcut.enabled;
   return {
     ok: true,
     daemonRunning: true,
@@ -199,6 +206,9 @@ export function getFloatWindowStatus(platform = process.platform) {
     menubarMode: MENUBAR_MODES.includes(st.menubarMode) ? st.menubarMode : prefMode,
     menubarActive: Boolean(st.menubarEnabled),
     menubarSupported,
+    shortcutEnabled,
+    shortcutActive: menubarSupported && shortcutEnabled && (st.mode || 'native-macos') === 'native-macos',
+    shortcut,
     statusTitle: st.statusTitle || null,
     activeConvId: st.activeConvId || null,
     activeConvTitle: st.activeConvTitle || null,
@@ -350,11 +360,12 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     const prevVisible = Boolean(current.windowVisible ?? current.running);
     const prevPinned = current.pinned !== false;
     const prevMenubar = Boolean(current.menubarEnabled);
+    const prevShortcut = Boolean(current.shortcutEnabled ?? getShortcutConfig(platform).enabled);
     const prevMode = MENUBAR_MODES.includes(current.menubarMode) ? current.menubarMode : getMenubarMode();
-    upgradedFrom = { prevVisible, prevPinned, prevMenubar, prevMode };
+    upgradedFrom = { prevVisible, prevPinned, prevMenubar, prevShortcut, prevMode };
     await terminateFn(current.pid);
     current = null;
-    if (action === 'ensure-menubar' && prevVisible) {
+    if ((action === 'ensure-menubar' || action === 'ensure-daemon') && prevVisible) {
       const restarted = await spawnFn({
         pinned: prevPinned,
         menubarEnabled: platform === 'darwin' ? getMenubarPreference() : false,
@@ -363,7 +374,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       });
       return restarted || getFloatWindowStatus(platform);
     }
-    if (action === 'refresh-session' && (prevVisible || (platform === 'darwin' && prevMenubar))) {
+    if (action === 'refresh-session' && (prevVisible || (platform === 'darwin' && (prevMenubar || prevShortcut)))) {
       const restarted = await spawnFn({
         pinned: prevPinned,
         menubarEnabled: platform === 'darwin' ? prevMenubar : false,
@@ -392,23 +403,95 @@ export async function controlFloatWindow(options = {}, deps = {}) {
     return getFloatWindowStatus(platform);
   }
 
-  if (action === 'ensure-menubar') {
-    if (platform !== 'darwin' || !getMenubarPreference()) {
+  if (action === 'ensure-menubar' || action === 'ensure-daemon') {
+    if (platform !== 'darwin') {
+      return getFloatWindowStatus(platform);
+    }
+    const wantMenubar = getMenubarPreference();
+    const sc = getShortcutConfig(platform);
+    const wantShortcut = Boolean(sc.enabled);
+    if (!wantMenubar && !wantShortcut) {
       return getFloatWindowStatus(platform);
     }
     if (current) {
-      if (!current.menubarEnabled) {
+      if (wantMenubar && !current.menubarEnabled) {
         return sendCmdFn(current, { cmd: 'setMenubar', enabled: true, mode: getMenubarMode() });
+      }
+      if (
+        current.shortcutEnabled !== undefined &&
+        (
+          Boolean(current.shortcutEnabled) !== wantShortcut ||
+          (wantShortcut && current.shortcutAccelerator && current.shortcutAccelerator !== sc.accelerator) ||
+          (wantShortcut && current.shortcutScope && current.shortcutScope !== sc.scope)
+        )
+      ) {
+        return sendCmdFn(current, {
+          cmd: 'setShortcut',
+          enabled: wantShortcut,
+          accelerator: sc.accelerator,
+          display: sc.display,
+          scope: sc.scope,
+          keyCode: sc.macCarbon?.keyCode ?? -1,
+          modifiers: sc.macCarbon?.modifiers ?? 0
+        });
       }
       return getFloatWindowStatus(platform);
     }
     const st = await spawnFn({
       pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
-      menubarEnabled: true,
+      menubarEnabled: wantMenubar,
       hiddenWindow: true,
       menubarMode: upgradedFrom ? upgradedFrom.prevMode : getMenubarMode()
     });
     return st || getFloatWindowStatus(platform);
+  }
+
+  if (action === 'set-shortcut') {
+    const saved = setShortcutConfig(options, platform);
+    if (!saved.ok) {
+      return {
+        ...getFloatWindowStatus(platform),
+        ok: false,
+        error: saved.error,
+        shortcut: saved.shortcut
+      };
+    }
+    const sc = saved.shortcut;
+    let nextStatus = null;
+    if (platform === 'darwin') {
+      if (current) {
+        nextStatus = await sendCmdFn(current, {
+          cmd: 'setShortcut',
+          enabled: sc.enabled,
+          accelerator: sc.accelerator,
+          display: sc.display,
+          scope: sc.scope,
+          keyCode: sc.macCarbon?.keyCode ?? -1,
+          modifiers: sc.macCarbon?.modifiers ?? 0
+        });
+      } else if (sc.enabled) {
+        nextStatus = await spawnFn({
+          pinned: upgradedFrom ? upgradedFrom.prevPinned : true,
+          menubarEnabled: getMenubarPreference(),
+          hiddenWindow: true,
+          menubarMode: upgradedFrom ? upgradedFrom.prevMode : getMenubarMode()
+        });
+      }
+    }
+    const fresh = getFloatWindowStatus(platform);
+    const scopeLabel = sc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+    const message = !sc.enabled
+      ? '已关闭侧栏看板快捷键'
+      : platform === 'darwin'
+        ? `已启用看板快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧上下文看板`
+        : `已保存看板快捷键 ${sc.display}（焦点位于看板内时可一键关闭或切换）`;
+    return {
+      ...(nextStatus || fresh),
+      ...fresh,
+      ok: true,
+      shortcut: sc,
+      message
+    };
   }
 
   if (action === 'set-menubar-mode') {
@@ -497,6 +580,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
         error: diagnoseMacMenubarFailure()
       };
     }
+    const sc = getShortcutConfig(platform);
     return {
       ...(nextStatus || fresh),
       ...fresh,
@@ -505,7 +589,9 @@ export async function controlFloatWindow(options = {}, deps = {}) {
       menubarMode: curMode,
       message: wantEnabled
         ? `已开启顶部菜单栏常驻图标（${MENUBAR_MODE_LABELS[curMode]}${fresh.statusTitle ? `：${fresh.statusTitle}` : ''}），单击可秒开或收回看板`
-        : '已关闭顶部菜单栏常驻图标（仍可随时使用 📌 右侧置顶小窗）'
+        : sc.enabled
+          ? `已关闭顶部菜单栏常驻图标（快捷键 ${sc.display} 与 📌 右侧置顶小窗仍随时可用）`
+          : '已关闭顶部菜单栏常驻图标（仍可随时使用 📌 右侧置顶小窗）'
     };
   }
 
@@ -520,12 +606,19 @@ export async function controlFloatWindow(options = {}, deps = {}) {
         message: '右侧独立看板当前已处于关闭状态'
       };
     }
-    if (current.menubarEnabled && current.mode === 'native-macos') {
+    const sc = getShortcutConfig(platform);
+    const keepResident = Boolean(current.menubarEnabled || (current.shortcutEnabled ?? sc.enabled));
+    if (keepResident && current.mode === 'native-macos') {
       const st = await sendCmdFn(current, { cmd: 'hideWindow' });
+      const reopenHint = current.menubarEnabled && sc.enabled
+        ? `按 ${sc.display} 或单击菜单栏 ◈ 图标可随时秒开`
+        : sc.enabled
+          ? `按 ${sc.display} 可随时秒开`
+          : '顶部菜单栏 ◈ 图标仍常驻，单击可随时秒开';
       return {
         ...st,
         closed: true,
-        message: '已收回右侧小窗（顶部菜单栏 ◈ 图标仍常驻，单击可随时秒开）'
+        message: `已收回右侧小窗（${reopenHint}）`
       };
     }
     await terminateFn(current.pid);
@@ -582,7 +675,7 @@ export async function controlFloatWindow(options = {}, deps = {}) {
 // Daemon Implementation (Native macOS Menu Bar + WKWebView IPC + Fallback)
 // ---------------------------------------------------------------------------
 
-function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, initialMode = 'context' }) {
+function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, initialMode = 'context', initialShortcut = null }) {
   let html = readFileSync(join(__dirname, 'index.html'), 'utf-8');
   const css = readFileSync(join(__dirname, 'styles.css'), 'utf-8').replace(/<\/style/gi, '<\\/style');
   const js = readFileSync(join(__dirname, 'app.js'), 'utf-8').replace(/<\/script/gi, '<\\/script');
@@ -602,6 +695,7 @@ function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, i
   window.__CV_INITIAL_HIDDEN__ = ${initialHidden ? 'true' : 'false'};
   window.__CV_MENUBAR_ENABLED__ = ${initialMenubar ? 'true' : 'false'};
   window.__CV_MENUBAR_MODE__ = ${JSON.stringify(initialMode || 'context')};
+  window.__CV_SHORTCUT_INIT__ = ${JSON.stringify(initialShortcut || null)};
   let seq = 1;
   const pending = new Map();
 
@@ -626,6 +720,11 @@ function buildBundledFloatHtml({ initialPinned, initialHidden, initialMenubar, i
       window.__CV_FLOAT_PINNED__ = Boolean(pinned);
       window.webkit?.messageHandlers?.cvBridge?.postMessage(
         JSON.stringify({ kind: "togglePin", pinned: Boolean(pinned) })
+      );
+    },
+    setShortcutRecording: (recording) => {
+      window.webkit?.messageHandlers?.cvBridge?.postMessage(
+        JSON.stringify({ kind: "setShortcutRecording", recording: Boolean(recording) })
       );
     },
     closeFloatWindow: () => {
@@ -987,6 +1086,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
     return launchCliTerminal(data);
   }
   if (u.pathname === '/api/float-window') {
+    const shortcut = getShortcutConfig();
     return {
       ok: true,
       daemonRunning: true,
@@ -995,15 +1095,19 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       pinned: Boolean(currentState.pinned),
       menubarEnabled: Boolean(currentState.menubarEnabled),
       menubarMode: currentState.menubarMode || getMenubarMode(),
+      shortcutEnabled: Boolean(currentState.shortcutEnabled ?? shortcut.enabled),
+      shortcut,
       mode: currentState.mode
     };
   }
   if (u.pathname === '/api/entrypoints' && method === 'GET') {
+    const shortcut = getShortcutConfig();
     return {
       ...getSidebarEntryStatus(),
       menubarEnabled: Boolean(currentState.menubarEnabled),
       menubarMode: currentState.menubarMode || getMenubarMode(),
       menubarSupported: process.platform === 'darwin',
+      shortcut,
       floatWindow: {
         ok: true,
         daemonRunning: true,
@@ -1012,11 +1116,23 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
         pinned: Boolean(currentState.pinned),
         menubarEnabled: Boolean(currentState.menubarEnabled),
         menubarMode: currentState.menubarMode || getMenubarMode(),
+        shortcutEnabled: Boolean(currentState.shortcutEnabled ?? shortcut.enabled),
+        shortcut,
         mode: currentState.mode
       }
     };
   }
   if (u.pathname === '/api/entrypoints' && method === 'POST') {
+    const isShortcutUpdate = (
+      data.target === 'shortcut' ||
+      data.shortcutReset === true ||
+      data.reset === true ||
+      data.accelerator !== undefined ||
+      data.shortcutAccelerator !== undefined ||
+      typeof data.shortcutEnabled === 'boolean' ||
+      data.shortcutScope !== undefined ||
+      data.scope !== undefined
+    );
     const hasSessionHint = typeof data.pinnedConvId === 'string' || typeof data.activeHostConvId === 'string';
     if (hasSessionHint) {
       updateActiveSessionHint({
@@ -1029,6 +1145,7 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
       }
       hooks.onRefreshMenubar?.();
       if (
+        !isShortcutUpdate &&
         typeof data.menubarEnabled !== 'boolean' &&
         typeof data.menubarMode !== 'string' &&
         typeof data.sidebarEnabled !== 'boolean' &&
@@ -1041,6 +1158,27 @@ async function dispatchApiRpc(rawPath, method, rawBody, currentState, hooks = {}
           menubarSupported: process.platform === 'darwin'
         };
       }
+    }
+    if (isShortcutUpdate) {
+      if (hooks.onSetShortcut) {
+        return hooks.onSetShortcut(data);
+      }
+      const saved = setShortcutConfig(data);
+      if (!saved.ok) {
+        return { ...getSidebarEntryStatus(), ok: false, error: saved.error, shortcut: saved.shortcut };
+      }
+      const sc = saved.shortcut;
+      const scopeLabel = sc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+      return {
+        ...getSidebarEntryStatus(),
+        ok: true,
+        shortcut: sc,
+        message: !sc.enabled
+          ? '已关闭侧栏看板快捷键'
+          : process.platform === 'darwin'
+            ? `已启用看板快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧上下文看板`
+            : `已保存看板快捷键 ${sc.display}（焦点位于看板内时可一键关闭或切换）`
+      };
     }
     if (typeof data.menubarMode === 'string' && hooks.onSetMenubarMode) {
       return hooks.onSetMenubarMode(data.menubarMode);
@@ -1106,6 +1244,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
   }
 
   const resolvedMode = MENUBAR_MODES.includes(initialMode) ? initialMode : getMenubarMode();
+  const initialSc = getShortcutConfig('darwin');
   const state = {
     daemonVersion: DAEMON_VERSION,
     daemonBuildId: DAEMON_BUILD_ID,
@@ -1116,6 +1255,10 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
     pinned: initialPinned,
     menubarEnabled: initialMenubar,
     menubarMode: resolvedMode,
+    shortcutEnabled: Boolean(initialSc.enabled),
+    shortcutAccelerator: initialSc.accelerator,
+    shortcutDisplay: initialSc.display,
+    shortcutScope: initialSc.scope,
     statusTitle: resolvedMode === 'speed' ? '⚡ --t/s' : resolvedMode === 'quota' ? '⏳ 额度 --%' : '◈ --%',
     activeConvId: null,
     activeConvTitle: null,
@@ -1126,10 +1269,21 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
     startedAt: new Date().toISOString()
   };
 
+  const shouldKeepResident = () => Boolean(state.menubarEnabled || state.shortcutEnabled);
+
   const args = ['--mode', resolvedMode];
   if (!initialPinned) args.push('--unpinned');
   if (!initialMenubar) args.push('--no-menubar');
   if (!initialVisible) args.push('--hidden-window');
+  if (!initialSc.enabled) args.push('--no-shortcut');
+  if (typeof initialSc.macCarbon?.keyCode === 'number') {
+    args.push('--shortcut-keycode', String(initialSc.macCarbon.keyCode));
+    args.push('--shortcut-mods', String(initialSc.macCarbon.modifiers || 0));
+  }
+  if (initialSc.display) {
+    args.push('--shortcut-label', initialSc.display);
+  }
+  args.push('--shortcut-scope', initialSc.scope || 'app');
 
   const child = spawn(binPath, args, { stdio: ['pipe', 'pipe', 'ignore'] });
 
@@ -1207,6 +1361,9 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       await refreshMenubarStatusItem(true);
     }
     writeFloatState(state);
+    if (!shouldKeepResident() && !state.windowVisible) {
+      setTimeout(shutdown, 80);
+    }
     return {
       ...getSidebarEntryStatus(),
       ok: true,
@@ -1221,12 +1378,67 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         pinned: Boolean(state.pinned),
         menubarEnabled: wantEnabled,
         menubarMode: state.menubarMode,
+        shortcutEnabled: Boolean(state.shortcutEnabled),
         statusTitle: state.statusTitle,
         mode: state.mode
       },
       message: wantEnabled
         ? `已开启顶部菜单栏常驻图标（当前显示：${state.statusTitle}）`
-        : '已关闭顶部菜单栏常驻图标'
+        : state.shortcutEnabled
+          ? `已关闭顶部菜单栏常驻图标（快捷键 ${state.shortcutDisplay || '⌥⌘K'} 仍可一键唤起）`
+          : '已关闭顶部菜单栏常驻图标'
+    };
+  };
+
+  const handleSetShortcutInDaemon = async (payload) => {
+    const saved = setShortcutConfig(payload, 'darwin');
+    if (!saved.ok) {
+      return {
+        ...getSidebarEntryStatus(),
+        ok: false,
+        error: saved.error,
+        shortcut: saved.shortcut
+      };
+    }
+    const sc = saved.shortcut;
+    state.shortcutEnabled = Boolean(sc.enabled);
+    state.shortcutAccelerator = sc.accelerator;
+    state.shortcutDisplay = sc.display;
+    state.shortcutScope = sc.scope;
+    sendToChild({
+      type: 'setShortcut',
+      enabled: sc.enabled,
+      accelerator: sc.accelerator,
+      keyCode: sc.macCarbon?.keyCode ?? -1,
+      modifiers: sc.macCarbon?.modifiers ?? 0,
+      label: sc.display,
+      scope: sc.scope
+    });
+    writeFloatState(state);
+    if (!shouldKeepResident() && !state.windowVisible) {
+      setTimeout(shutdown, 80);
+    }
+    const scopeLabel = sc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+    return {
+      ...getSidebarEntryStatus(),
+      ok: true,
+      shortcut: sc,
+      floatWindow: {
+        ok: true,
+        daemonRunning: true,
+        running: Boolean(state.windowVisible),
+        windowVisible: Boolean(state.windowVisible),
+        pinned: Boolean(state.pinned),
+        menubarEnabled: Boolean(state.menubarEnabled),
+        menubarMode: state.menubarMode,
+        shortcutEnabled: Boolean(sc.enabled),
+        shortcut: sc,
+        statusTitle: state.statusTitle,
+        mode: state.mode
+      },
+      message: sc.enabled
+        ? `已启用看板快捷键 ${sc.display}（${scopeLabel}），可一键打开或关闭右侧上下文看板`
+        : '已关闭侧栏看板快捷键'
     };
   };
 
@@ -1260,6 +1472,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         pinned: Boolean(state.pinned),
         menubarEnabled: true,
         menubarMode: validMode,
+        shortcutEnabled: Boolean(state.shortcutEnabled),
         statusTitle: state.statusTitle,
         mode: state.mode
       },
@@ -1295,7 +1508,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         state.running = true;
         sendToChild({ type: 'showWindow' });
       } else if (action === 'hideWindow') {
-        if (state.menubarEnabled) {
+        if (shouldKeepResident()) {
           state.windowVisible = false;
           state.running = false;
           sendToChild({ type: 'hideWindow' });
@@ -1305,7 +1518,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
         }
       } else if (action === 'toggleWindow') {
         if (state.windowVisible) {
-          if (state.menubarEnabled) {
+          if (shouldKeepResident()) {
             state.windowVisible = false;
             state.running = false;
             sendToChild({ type: 'hideWindow' });
@@ -1329,7 +1542,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           lastSentTip = '';
           lastSentMode = '';
         }
-        if (!en && !state.windowVisible) {
+        if (!shouldKeepResident() && !state.windowVisible) {
           shutdown();
           return;
         }
@@ -1338,6 +1551,25 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           if (latestSnap) applySnapToMenubar(latestSnap);
           await refreshMenubarStatusItem(true);
         }
+      } else if (action === 'setShortcut') {
+        const sc = getShortcutConfig('darwin');
+        state.shortcutEnabled = typeof cmd.enabled === 'boolean' ? cmd.enabled : Boolean(sc.enabled);
+        state.shortcutAccelerator = cmd.accelerator || sc.accelerator;
+        state.shortcutDisplay = cmd.display || sc.display;
+        state.shortcutScope = cmd.scope || sc.scope;
+        if (!shouldKeepResident() && !state.windowVisible) {
+          shutdown();
+          return;
+        }
+        sendToChild({
+          type: 'setShortcut',
+          enabled: state.shortcutEnabled,
+          accelerator: state.shortcutAccelerator,
+          keyCode: typeof cmd.keyCode === 'number' ? cmd.keyCode : (sc.macCarbon?.keyCode ?? -1),
+          modifiers: typeof cmd.modifiers === 'number' ? cmd.modifiers : (sc.macCarbon?.modifiers ?? 0),
+          label: state.shortcutDisplay,
+          scope: state.shortcutScope
+        });
       } else if (action === 'setMenubarMode') {
         const validMode = setMenubarMode(cmd.mode);
         state.menubarMode = validMode;
@@ -1381,6 +1613,9 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       if (msg.menubarMode && MENUBAR_MODES.includes(msg.menubarMode)) {
         state.menubarMode = msg.menubarMode;
       }
+      if (typeof msg.shortcutEnabled === 'boolean') {
+        state.shortcutEnabled = msg.shortcutEnabled;
+      }
       state.windowVisible = Boolean(msg.windowVisible);
       state.running = state.windowVisible;
       writeFloatState(state);
@@ -1390,7 +1625,8 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           initialPinned: state.pinned,
           initialHidden: !state.windowVisible,
           initialMenubar: state.menubarEnabled,
-          initialMode: state.menubarMode
+          initialMode: state.menubarMode,
+          initialShortcut: getShortcutConfig('darwin')
         })
       });
       if (state.menubarEnabled) {
@@ -1420,7 +1656,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
       state.windowVisible = Boolean(msg.windowVisible);
       state.running = state.windowVisible;
       writeFloatState(state);
-      if (!state.windowVisible) {
+      if (!state.windowVisible && !shouldKeepResident()) {
         clearFloatStateIfOwned();
         process.exit(0);
       }
@@ -1432,7 +1668,8 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
             initialPinned: state.pinned,
             initialHidden: !state.windowVisible,
             initialMenubar: state.menubarEnabled,
-            initialMode: state.menubarMode
+            initialMode: state.menubarMode,
+            initialShortcut: getShortcutConfig('darwin')
           })
         });
         sendToChild({ type: 'rpcReply', id: msg.id, ok: true, status: 200, payload: { ok: true } });
@@ -1443,6 +1680,7 @@ async function startMacNativeDaemon({ initialPinned, initialMenubar, initialVisi
           onActiveContextSnap: applySnapToMenubar,
           onSetMenubar: handleSetMenubarInDaemon,
           onSetMenubarMode: handleSetMenubarModeInDaemon,
+          onSetShortcut: handleSetShortcutInDaemon,
           onRefreshMenubar: () => { refreshMenubarStatusItem(true).catch(() => {}); }
         });
         sendToChild({ type: 'rpcReply', id: msg.id, ok: true, status: 200, payload });

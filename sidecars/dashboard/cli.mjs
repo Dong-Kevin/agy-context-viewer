@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import {
   collectTokenHistory,
   getMenubarMode,
+  getShortcutConfig,
   getSidebarEntryStatus,
   MENUBAR_MODES,
   scanConversation,
@@ -113,6 +114,7 @@ function printHelp() {
     '  agy-context menubar [context|speed|quota]       定制 macOS 顶部菜单栏显示：上下文占比 / 速度与耗时 / 5h或Week额度',
     '  agy-context menubar [on|off|toggle|status]      开启、关闭或查看顶部菜单栏常驻图标（切换会话时自动跟随）',
     '  agy-context float [toggle|close|quit]           切换屏幕右侧独立置顶小窗（不受右侧栏切换影响，随时可取消置顶或收回）',
+    '  agy-context shortcut [combo|reset|off|--global] 查看或自定义侧栏看板开关快捷键（macOS 默认 ⌥⌘K，零辅助功能权限）',
     '  agy-context turns [conversationId]              查看最近 20 轮每轮上下文涨跌 (±Delta) 与工具调用明细',
     '  agy-context json [conversationId]               输出结构化 JSON 摘要（加 --full 输出完整原始快照）',
     '  agy-context web [--port 18970]                  启动独立本地 Web 看板并自动在浏览器打开（适合纯 CLI 用户）',
@@ -257,6 +259,70 @@ async function runFloatCommand(rawArgs) {
     return;
   }
   console.log(formatZh(`${c.green}✓${c.reset} ${res.message || (res.running ? '已打开独立看板' : '已收回独立看板')}`));
+}
+
+async function runShortcutCommand(rawArgs) {
+  const positionals = rawArgs.filter((a) => !a.startsWith('-'));
+  const rawSub = positionals[1] || '';
+  const sub = rawSub.toLowerCase();
+  const hasGlobalFlag = rawArgs.includes('--global');
+  const hasAppFlag = rawArgs.includes('--app');
+  const hasResetFlag = rawArgs.includes('--reset') || ['reset', 'default'].includes(sub);
+  const hasOffFlag = rawArgs.includes('--off') || ['off', 'disable', 'disabled', 'false', '0'].includes(sub);
+  const hasOnFlag = rawArgs.includes('--on') || ['on', 'enable', 'enabled', 'true', '1'].includes(sub);
+
+  const isPureStatus =
+    rawArgs.includes('--status') ||
+    sub === 'status' ||
+    (!rawSub && !hasGlobalFlag && !hasAppFlag && !hasResetFlag && !hasOffFlag && !hasOnFlag);
+
+  if (isPureStatus) {
+    const fw = getFloatWindowStatus();
+    const sc = fw.shortcut || getShortcutConfig();
+    if (rawArgs.includes('--json')) {
+      console.log(JSON.stringify({ ok: true, shortcut: sc, floatWindow: fw }, null, 2));
+      return;
+    }
+    const scopeLbl = sc.scope === 'global' ? '全局生效' : '仅宿主前台生效';
+    console.log(
+      formatZh(
+        !sc.enabled
+          ? `${c.dim}○${c.reset} 侧栏看板快捷键当前状态：已停用（已保存键位：${sc.display}，默认：${sc.defaultDisplay}）`
+          : fw.shortcutActive
+            ? `${c.green}●${c.reset} 侧栏看板快捷键运行中：${c.bold}${sc.display}${c.reset}（${scopeLbl} · PID ${fw.pid}）`
+            : `${c.cyan}◈${c.reset} 侧栏看板快捷键已配置：${c.bold}${sc.display}${c.reset}（${scopeLbl}${sc.isDefault ? ' · 默认' : ''}）`
+      )
+    );
+    return;
+  }
+
+  const patch = { action: 'set-shortcut' };
+  if (hasResetFlag) {
+    patch.reset = true;
+  } else {
+    if (hasOffFlag) {
+      patch.enabled = false;
+    } else if (hasOnFlag) {
+      patch.enabled = true;
+    } else if (rawSub) {
+      patch.accelerator = rawSub;
+      patch.enabled = true;
+    }
+    if (hasGlobalFlag) patch.scope = 'global';
+    else if (hasAppFlag) patch.scope = 'app';
+  }
+
+  const res = await controlFloatWindow(patch);
+  if (rawArgs.includes('--json')) {
+    console.log(JSON.stringify(res, null, 2));
+    return;
+  }
+  if (!res.ok) {
+    console.error(formatZh(`${c.red}✗${c.reset} ${res.error || '设置快捷键失败'}`));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(formatZh(`${c.green}✓${c.reset} ${res.message}`));
 }
 
 async function runWebServer(rawArgs) {
@@ -483,8 +549,13 @@ async function main() {
   }
 
   const firstPositional = rawArgs.find((a) => !a.startsWith('-')) || 'status';
-  const knownCmds = new Set(['status', 'turns', 'json', 'web', 'serve', 'open', 'float', 'pin', 'menubar', 'sidebar']);
+  const knownCmds = new Set(['status', 'turns', 'json', 'web', 'serve', 'open', 'float', 'pin', 'menubar', 'sidebar', 'shortcut', 'hotkey']);
   const cmd = knownCmds.has(firstPositional.toLowerCase()) ? firstPositional.toLowerCase() : 'status';
+
+  if (cmd === 'shortcut' || cmd === 'hotkey') {
+    await runShortcutCommand(rawArgs);
+    return;
+  }
 
   if (cmd === 'menubar') {
     await runMenubarCommand(rawArgs);

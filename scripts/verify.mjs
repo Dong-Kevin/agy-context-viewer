@@ -925,10 +925,18 @@ async function main() {
 
     const {
       collectTokenHistory,
+      DEFAULT_SHORTCUT_MAC,
+      DEFAULT_SHORTCUT_OTHER,
+      formatShortcutDisplay,
+      getDefaultShortcut,
+      getShortcutConfig,
       listRecentConversations,
+      normalizeShortcutSpec,
       parseModelSettingFromText,
       scanConversation,
-      setMenubarPreference
+      setMenubarPreference,
+      setShortcutConfig,
+      shortcutToMacCarbon
     } = await import(join(ROOT, 'sidecars', 'dashboard', 'collector.mjs'));
 
     // R6: Model version decimals, parentheses & multi-switch sequences
@@ -2043,6 +2051,67 @@ async function main() {
         body: '{}'
       });
       assert(rAuthClose.status === 200 && fallbackCloseTriggered, '授权 POST /api/float-window 应正常触发关闭回调');
+
+      // Shortcut API CRUD over authenticated /api/entrypoints
+      const rSetSc = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ target: 'shortcut', accelerator: 'opt+cmd+l', scope: 'global' })
+      });
+      const setScBody = JSON.parse(rSetSc.body);
+      assert(
+        rSetSc.status === 200 &&
+          setScBody.ok === true &&
+          setScBody.shortcut?.accelerator === 'Alt+Meta+L' &&
+          setScBody.shortcut?.scope === 'global' &&
+          setScBody.shortcut?.enabled === true,
+        `POST /api/entrypoints 自定义快捷键返回异常：${rSetSc.body}`
+      );
+
+      const rBadSc = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ target: 'shortcut', accelerator: 'k' })
+      });
+      const badScBody = JSON.parse(rBadSc.body);
+      assert(
+        rBadSc.status === 200 &&
+          badScBody.ok === false &&
+          badScBody.shortcut?.accelerator === 'Alt+Meta+L',
+        `非法单键快捷键应被拒绝且保留原有效配置：${rBadSc.body}`
+      );
+
+      const rResetSc = await rawHttpRequest({
+        port: fbPort,
+        method: 'POST',
+        path: '/api/entrypoints',
+        headers: {
+          Origin: `http://127.0.0.1:${fbPort}`,
+          'Content-Type': 'application/json',
+          'X-CV-Token': fbToken
+        },
+        body: JSON.stringify({ target: 'shortcut', reset: true })
+      });
+      const resetScBody = JSON.parse(rResetSc.body);
+      assert(
+        rResetSc.status === 200 &&
+          resetScBody.ok === true &&
+          resetScBody.shortcut?.isDefault === true &&
+          resetScBody.shortcut?.scope === 'app',
+        `POST /api/entrypoints 恢复默认快捷键异常：${rResetSc.body}`
+      );
     } finally {
       await new Promise((r) => fbServer.close(r));
     }
@@ -2159,6 +2228,231 @@ async function main() {
       for (const p of dummyProcs) {
         try { p.kill('SIGKILL'); } catch {}
       }
+    }
+
+    // 6d: Customizable Shortcut Normalization, Carbon Keycodes, UI KeyEvent Matching, Resident Lifecycle & Swift Typecheck
+    assert(getDefaultShortcut('darwin') === DEFAULT_SHORTCUT_MAC && DEFAULT_SHORTCUT_MAC === 'Alt+Meta+K', 'macOS 默认快捷键应为 Alt+Meta+K');
+    assert(getDefaultShortcut('win32') === DEFAULT_SHORTCUT_OTHER && DEFAULT_SHORTCUT_OTHER === 'Ctrl+Alt+K', 'Windows/Linux 默认快捷键应为 Ctrl+Alt+K');
+    assert(formatShortcutDisplay('Alt+Meta+K', 'darwin') === '⌥⌘K', 'macOS 快捷键显示符号应为 ⌥⌘K');
+    assert(formatShortcutDisplay('Ctrl+Alt+K', 'win32') === 'Ctrl+Alt+K', 'Windows 快捷键显示格式应为 Ctrl+Alt+K');
+
+    const macDefaultCarbon = shortcutToMacCarbon('Alt+Meta+K');
+    assert(
+      macDefaultCarbon?.keyCode === 40 && macDefaultCarbon?.modifiers === (2048 | 256),
+      `Alt+Meta+K Carbon 键码映射异常：${JSON.stringify(macDefaultCarbon)}`
+    );
+
+    const normGlyph = normalizeShortcutSpec('⌃⇧⌘Space', 'darwin');
+    assert(
+      normGlyph.ok &&
+        !normGlyph.disabled &&
+        normGlyph.accelerator === 'Ctrl+Shift+Meta+Space' &&
+        normGlyph.display === '⌃⇧⌘Space' &&
+        normGlyph.macCarbon?.keyCode === 49 &&
+        normGlyph.macCarbon?.modifiers === (4096 | 512 | 256),
+      `紧凑符号快捷键解析异常：${JSON.stringify(normGlyph)}`
+    );
+    const normFn = normalizeShortcutSpec('f8', 'darwin');
+    assert(normFn.ok && normFn.accelerator === 'F8' && normFn.macCarbon?.keyCode === 100, 'F8 功能键解析异常');
+    const normOff = normalizeShortcutSpec('off', 'darwin');
+    assert(normOff.ok && normOff.disabled === true, 'off 停用指令解析异常');
+
+    for (const bad of ['K', 'Shift+K', 'Meta+Alt', 'Meta+C', 'Meta+Q', 'Meta+Space', 'Shift+Meta+Z', 'Alt+Meta+K+L']) {
+      const r = normalizeShortcutSpec(bad, 'darwin');
+      assert(!r.ok, `macOS 下非法或系统保留组合键「${bad}」必须被拦截`);
+    }
+    assert(!normalizeShortcutSpec('Ctrl+C', 'win32').ok, 'Windows 下 Ctrl+C 必须被拦截');
+
+    // Persistence: custom -> off preserves accelerator -> reset restores default
+    const savedCustom = setShortcutConfig({ accelerator: 'ctrl+opt+j', scope: 'global' }, 'darwin');
+    assert(
+      savedCustom.ok &&
+        savedCustom.shortcut.accelerator === 'Ctrl+Alt+J' &&
+        savedCustom.shortcut.display === '⌃⌥J' &&
+        savedCustom.shortcut.scope === 'global' &&
+        savedCustom.shortcut.isDefault === false,
+      'setShortcutConfig 自定义保存异常'
+    );
+    const savedDisabled = setShortcutConfig({ accelerator: 'off' }, 'darwin');
+    assert(
+      savedDisabled.ok &&
+        savedDisabled.shortcut.enabled === false &&
+        savedDisabled.shortcut.accelerator === 'Ctrl+Alt+J',
+      'setShortcutConfig off 停用时应保留原已选键位以便重新启用'
+    );
+    const savedReenabled = setShortcutConfig({ enabled: true }, 'darwin');
+    assert(savedReenabled.ok && savedReenabled.shortcut.enabled === true && savedReenabled.shortcut.accelerator === 'Ctrl+Alt+J', '重新启用快捷键状态异常');
+    const savedReset = setShortcutConfig({ reset: true }, 'darwin');
+    assert(
+      savedReset.ok &&
+        savedReset.shortcut.isDefault === true &&
+        savedReset.shortcut.accelerator === 'Alt+Meta+K' &&
+        savedReset.shortcut.scope === 'app' &&
+        getShortcutConfig('darwin').isDefault === true,
+      'setShortcutConfig reset 恢复默认异常'
+    );
+
+    // UI KeyEvent matching in app.js (verifies macOS Option+Cmd+K dead-character `˚` handling via `ev.code`)
+    const scFnStart = appJsSrc.indexOf('const SPECIAL_EVENT_CODES = new Set(');
+    const scFnEnd = appJsSrc.indexOf('function startShortcutRecording()', scFnStart);
+    assert(scFnStart > 0 && scFnEnd > scFnStart, '未定位到 app.js 快捷键事件解析函数区间');
+    const scVmCtx = {
+      state: { shortcut: { nativeGlobalSupported: true } },
+      Set,
+      String,
+      Boolean
+    };
+    runInNewContext(
+      `${appJsSrc.slice(scFnStart, scFnEnd)}\nthis.buildAcc = buildAcceleratorFromKeyEvent;\nthis.matchAcc = eventMatchesAccelerator;`,
+      scVmCtx
+    );
+    const macDeadCharEv = {
+      code: 'KeyK',
+      key: '˚',
+      ctrlKey: false,
+      altKey: true,
+      shiftKey: false,
+      metaKey: true
+    };
+    const builtMacChord = scVmCtx.buildAcc(macDeadCharEv);
+    assert(
+      builtMacChord.ok && builtMacChord.accelerator === 'Alt+Meta+K',
+      `macOS Option+Cmd+K 特殊字符事件构建失败：${JSON.stringify(builtMacChord)}`
+    );
+    assert(
+      scVmCtx.matchAcc(macDeadCharEv, 'Alt+Meta+K') === true &&
+        scVmCtx.matchAcc({ ...macDeadCharEv, shiftKey: true }, 'Alt+Meta+K') === false,
+      'eventMatchesAccelerator 精确修饰键匹配异常'
+    );
+    const modPreview = scVmCtx.buildAcc({ code: 'AltLeft', key: 'Alt', ctrlKey: false, altKey: true, shiftKey: false, metaKey: true });
+    assert(modPreview.modifierOnly === true && modPreview.preview === '⌥⌘…', '录制中纯修饰键实时预览异常');
+
+    // Resident daemon lifecycle when menubar is OFF while shortcut is ON
+    const scProcs = [];
+    const spawnScDummy = () => {
+      const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' });
+      scProcs.push(p);
+      return p;
+    };
+    try {
+      const floatStateFile = join(isolatedStateDir, 'float_window_state.json');
+      try { rmSync(floatStateFile, { force: true }); } catch {}
+      setMenubarPreference(false);
+      setShortcutConfig({ reset: true }, 'darwin'); // enabled: true, menubarEnabled: false
+
+      const scDaemonProc = spawnScDummy();
+      let scSpawnCount = 0;
+      let lastSentCmd = null;
+      const mockScSpawn = async (opts) => {
+        scSpawnCount += 1;
+        writeFileSync(floatStateFile, JSON.stringify({
+          daemonVersion: DAEMON_VERSION,
+          daemonBuildId: DAEMON_BUILD_ID,
+          daemonRunning: true,
+          running: !opts.hiddenWindow,
+          windowVisible: !opts.hiddenWindow,
+          pid: scDaemonProc.pid,
+          pinned: Boolean(opts.pinned),
+          menubarEnabled: Boolean(opts.menubarEnabled),
+          shortcutEnabled: true,
+          shortcutAccelerator: 'Alt+Meta+K',
+          shortcutScope: 'app',
+          menubarMode: opts.menubarMode || 'context',
+          mode: 'native-macos',
+          cmdSeq: 1
+        }), 'utf-8');
+        return getFloatWindowStatus('darwin');
+      };
+      const mockScSendCmd = async (_cur, cmdObj) => {
+        lastSentCmd = cmdObj;
+        if (cmdObj.cmd === 'hideWindow') {
+          const curObj = JSON.parse(readFileSync(floatStateFile, 'utf-8'));
+          curObj.windowVisible = false;
+          curObj.running = false;
+          writeFileSync(floatStateFile, JSON.stringify(curObj), 'utf-8');
+        }
+        return getFloatWindowStatus('darwin');
+      };
+
+      // Menu bar is OFF, shortcut is ON -> ensure-menubar must still spawn hidden resident daemon for hotkey!
+      const ensureScOnly = await controlFloatWindow(
+        { action: 'ensure-menubar' },
+        { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
+      );
+      assert(
+        scSpawnCount === 1 && ensureScOnly.daemonRunning === true && ensureScOnly.menubarEnabled === false && ensureScOnly.shortcutActive === true,
+        `菜单栏关闭但快捷键开启时 ensure-menubar 应启动常驻守护以监听热键：${JSON.stringify(ensureScOnly)}`
+      );
+
+      // Mark window visible and call close -> must send hideWindow (NOT terminate daemon) while shortcut is ON
+      const visObj = JSON.parse(readFileSync(floatStateFile, 'utf-8'));
+      visObj.windowVisible = true;
+      visObj.running = true;
+      writeFileSync(floatStateFile, JSON.stringify(visObj), 'utf-8');
+      const closeKeepResident = await controlFloatWindow(
+        { action: 'close' },
+        { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
+      );
+      assert(
+        lastSentCmd?.cmd === 'hideWindow' && isTestPidAlive(scDaemonProc.pid) && closeKeepResident.closed === true,
+        '快捷键开启但菜单栏关闭时收回窗口不应杀死原生热键守护进程'
+      );
+
+      // When BOTH menubar and shortcut are OFF -> close terminates non-resident daemon, and ensure-menubar does not spawn
+      setShortcutConfig({ enabled: false }, 'darwin');
+      visObj.shortcutEnabled = false;
+      visObj.windowVisible = true;
+      visObj.running = true;
+      writeFileSync(floatStateFile, JSON.stringify(visObj), 'utf-8');
+      await controlFloatWindow(
+        { action: 'close' },
+        { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
+      );
+      assert(!isTestPidAlive(scDaemonProc.pid), '菜单栏与快捷键均关闭时关闭小窗应退出守护进程');
+
+      const noSpawnWhenBothOff = await controlFloatWindow(
+        { action: 'ensure-menubar' },
+        { platform: 'darwin', spawnDaemon: mockScSpawn, sendDaemonCommand: mockScSendCmd }
+      );
+      assert(scSpawnCount === 1 && noSpawnWhenBothOff.daemonRunning === false, '菜单栏与快捷键均关闭时 ensure-menubar 不得拉起守护进程');
+      setShortcutConfig({ reset: true }, 'darwin');
+    } finally {
+      for (const p of scProcs) {
+        try { p.kill('SIGKILL'); } catch {}
+      }
+    }
+
+    // CLI shortcut status & validation check in isolated environment
+    const cliEntryPath = join(ROOT, 'sidecars', 'dashboard', 'cli.mjs');
+    const cliScStatusRaw = execFileSync(process.execPath, [cliEntryPath, 'shortcut', 'status', '--json'], {
+      encoding: 'utf-8',
+      env: isolatedEnv,
+      timeout: 8000
+    });
+    const cliScStatus = JSON.parse(cliScStatusRaw);
+    assert(
+      cliScStatus.ok === true && cliScStatus.shortcut?.enabled === true && cliScStatus.shortcut?.isDefault === true,
+      `cli.mjs shortcut status --json 输出异常：${cliScStatusRaw}`
+    );
+    let badCliRejected = false;
+    try {
+      execFileSync(process.execPath, [cliEntryPath, 'shortcut', 'k'], {
+        encoding: 'utf-8',
+        env: isolatedEnv,
+        stdio: 'pipe',
+        timeout: 8000
+      });
+    } catch (err) {
+      badCliRejected = err.status === 1;
+    }
+    assert(badCliRejected, 'cli.mjs shortcut k 单字母非法快捷键必须返回退出码 1');
+
+    // macOS Swift native host typecheck
+    if (process.platform === 'darwin' && existsSync('/usr/bin/swiftc')) {
+      execFileSync('/usr/bin/swiftc', ['-typecheck', join(ROOT, 'sidecars', 'dashboard', 'native_float_macos.swift')], {
+        stdio: 'pipe',
+        timeout: 25000
+      });
     }
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) {

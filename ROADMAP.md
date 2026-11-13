@@ -2,7 +2,14 @@
 
 ## 当前阶段
 
-已按授权将仓库局部 `.git/config` 绑定为 `Dong-Kevin` 的 GitHub `users.noreply.github.com` 身份，将尚未推送的两笔提交重写为 `be02146` 与 `7f0be5d`（**V1** 已完成），启用 `.git/hooks/pre-push` 软链接，并将 [第五轮代码与隐私复查](docs/CODEX_REVIEW_2026-11-13_PRIVACY.md) 隐私脱敏与门禁加固提交至本地 `main`、同步安装至本机 `~/.gemini/config/plugins/context-viewer`。**下一步待确认事项**：「自定义快捷键开关侧边栏看板」的交互形态与默认键位确认（见下）；远端 `git push / tag` 与 GitHub Release 发布仍待明确授权。
+已完成「自定义快捷键打开 / 关闭右侧上下文看板」全链路实现、自动化回归校验与本机 `~/.gemini/config/plugins/context-viewer` 覆盖安装热启用（macOS 默认 `⌥⌘K` 仅宿主前台生效、零辅助功能权限弹窗，支持面板点击按键录制、全局范围切换与 `agy-context shortcut` CLI），并已合入提交推送至远端 `origin/main`（全部提交通过 GitHub noreply 身份与 `pre-push` 隐私门禁）。**待触发事项**：远端版本 `git tag` 与 GitHub Release 发布包上传仍待明确授权。
+
+## 自定义快捷键开关上下文看板（2026-11-13 12:57 北京时间）
+
+- [x] **快捷键规范化、键码映射与持久化**：在 [collector.mjs](./sidecars/dashboard/collector.mjs) 新增 `DEFAULT_SHORTCUT_MAC`（`Alt+Meta+K` / `⌥⌘K`）、`DEFAULT_SHORTCUT_OTHER`（`Ctrl+Alt+K`）、`normalizeShortcutSpec`、`formatShortcutDisplay`、`shortcutToMacCarbon`、`getShortcutConfig` 与 `setShortcutConfig`；支持别名与紧凑符号解析（如 `opt+cmd+l`、`⌃⇧⌘Space`、`F1-F12`），拦截裸单键与系统保留基础编辑热键（如 `⌘C` / `⌘Q` / `⌘Space` / `⇧⌘Z`），停用（`off`）时保留上次自定义键位以便一键恢复。
+- [x] **macOS 原生 `Carbon` 热键监听、前台范围隔离与守护常驻联动**：在 [native_float_macos.swift](./sidecars/dashboard/native_float_macos.swift) 接入 `Carbon` `RegisterEventHotKey`（零辅助功能 TCC 权限弹窗），结合 `NSWorkspace.didActivateApplicationNotification` 实现默认 `app` 范围动态注册/注销（仅 Antigravity 或看板前台时响应，切到其他软件自动释放热键，收回窗口时平滑归还焦点），可选 `global` 全局生效，并在录制新组合键期间临时挂起热键拦截；升级 [float_window.mjs](./sidecars/dashboard/float_window.mjs)（`DAEMON_VERSION = 6`）与 [main.mjs](./sidecars/dashboard/main.mjs) `/api/entrypoints`，确保即使单独关闭顶部菜单栏图标、仅保留快捷键开启时，后台原生守护仍保持常驻监听。
+- [x] **前端交互录制器与 `agy-context shortcut` CLI**：在 [index.html](./sidecars/dashboard/index.html)、[styles.css](./sidecars/dashboard/styles.css)（严格 `--cv-*` 命名空间）与 [app.js](./sidecars/dashboard/app.js) 的「快捷入口模式与外观定制」抽屉新增点击按键录制（基于 `ev.code` 规避 macOS `Option` 特殊字符映射，支持修饰键实时预览与 `Esc` 取消）、启停开关、恢复默认与生效范围切换，并在面板焦点内支持快捷键联动关闭 / 切换；在 [cli.mjs](./sidecars/dashboard/cli.mjs) 新增 `agy-context shortcut [status|<combo>|reset|off|--global|--app]` 子命令，同步更新中英文 README、[install.sh](./install.sh) 与 [SKILL.md](./skills/context-viewer/SKILL.md)。
+- [x] **自动化测试补齐**：在 [scripts/verify.mjs](./scripts/verify.mjs) 新增组合键规范化与保留键拦截、macOS `Option` 特殊字符 `KeyboardEvent` 匹配、`/api/entrypoints` 鉴权设置与重置、「菜单栏关闭 + 快捷键开启」常驻守护生命周期、`cli.mjs shortcut` 及 macOS `/usr/bin/swiftc -typecheck` 编译校验。
 
 ## 第五轮代码与隐私复查（2026-11-13 11:45 北京时间）
 
@@ -10,8 +17,8 @@
 - [x] **隐私脱敏加固**：在 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 为 `maskEmail` 增加自定义域/企业域二级域主体掩码，新增并导出 `sanitizeDiagnosticText` 对 URL、Bearer / API Key、`~` 用户主目录路径及邮箱脱敏；在 `classifyRequestError` 与 [collector.mjs](./sidecars/dashboard/collector.mjs) 导出的 `turnsPayload[].error` 同步调用。
 - [x] **静态扫描与推送前身份门禁**：在 [verify.mjs](./scripts/verify.mjs) 补充未脱敏邮箱、PEM 私钥头、Bearer Token 与带凭据 URL 扫描、自定义域邮箱掩码及运行时错误脱敏隔离测试，并新增未推送提交 `--strict-git-identity` 检查（当仓库局部 `user.email` 为 noreply 时默认自动阻断非 noreply 提交，不回显敏感原文）；新增确定性仓库钩子 [scripts/pre-push](./scripts/pre-push) 并已通过 `.git/hooks/pre-push` 软链接启用。
 - [x] **V1 未推送提交身份重设与仓库局部身份锁定**：已在当前仓库 `.git/config` 写入 `Dong-Kevin` 与 `4256ee3` 同源 GitHub noreply 邮箱，并将未推送的前两笔提交重写为 `be02146` 与 `7f0be5d`，通过 `node scripts/verify.mjs --strict-git-identity` 零警告校验。
-- [ ] **待决策：快捷键开关上下文看板形态确认**：宿主官方 `sidecar_sdk`（`v2.31.2`）未开放从后台唤起已关闭「宿主内嵌右侧栏（Aux Pane）」的插件快捷键接口，且遵守不改写 `app.asar` / `~/.gemini/config/config.json` 边界；建议基于常驻原生右侧栏守护进程（`Carbon` `RegisterEventHotKey` 零辅助功能权限弹窗）实现一键开关贴靠右侧的侧栏看板（默认 `⌥⌘K`，仅 Antigravity 或看板前台生效并可选全局，支持面板按键录制自定义与 `agy-context shortcut` CLI），待确认后实施。
-- **验证与未实测范围**：本机 macOS + Node.js `v24.14.1` 上 `verify.mjs --strict-git-identity`（6/6 阶段，39 个文件）零警告通过，打包（`140.3 KB`，20 项）与 `./install.sh` 通过；Windows / Linux 桌面、Node.js 18 及其他后置建议仍未实测 / 未实施。
+- [x] **已确认并落地：快捷键开关上下文看板形态**：基于常驻原生右侧栏守护进程（`Carbon` `RegisterEventHotKey` 零辅助功能权限弹窗）实现一键开关贴靠右侧的侧栏看板（默认 `⌥⌘K`，默认 `app` 范围并可选 `global`）。
+- **验证与未实测范围**：本机 macOS + Node.js `v24.14.1` 上 `verify.mjs --strict-git-identity`（6/6 阶段，39 个文件）零警告通过，打包（`152.3 KB`，20 项）与 `./install.sh` 通过；Windows / Linux 桌面、Node.js 18 及其他后置建议仍未实测 / 未实施。
 
 ## 第四轮审查修复与验收记录（2026-11-13 09:15 北京时间）
 
@@ -55,7 +62,7 @@
   - **S5**：收窄 [scripts/verify.mjs](./scripts/verify.mjs) 与双语 README 中关于模式检查的表述，区分常见敏感模式 / PNG 文本块检查与完整安全审计。
   - **S6**：在 [scripts/verify.mjs](./scripts/verify.mjs) 新增完全隔离目录（自动清理、零触碰 `~/.gemini`）的 R1–R8、S2 / S4 与 F1–F4 行为回归测试套件。
   - **S7**：将 [plugin.json](./plugin.json)、[index.html](./sidecars/dashboard/index.html)、[cli.mjs](./sidecars/dashboard/cli.mjs)（动态读取 `plugin.json`）与双语 README 统一升至 `v1.6.3`；执行 `./install.sh` 完成本机就地升级与菜单栏守护热接管；使用隔离合成样本通过无头 Chrome 真实渲染重拍并脱敏剥离元数据生成 `docs/images/usage-trends.png`（`2025-11-09 至 2026-11-12` 多级热力格子与区间汇总正常显示）。
-- **待触发外部动作（暂未执行）**：尚未执行 `git add / commit / tag / push` 及 GitHub Release 上传。
+- **待触发外部动作（暂未执行）**：`main` 分支提交与推送已完成；尚未执行 `git tag` 及 GitHub Release 上传。
 - **未覆盖环境说明**：本机验证环境为 macOS + Node.js `v24.14.1`（已完成本机 `./install.sh` 覆盖安装、菜单栏守护运行与 Chrome 无头渲染核验）；尚未在 Windows PowerShell 5.1 / 7 + `cmd.exe`、Linux 桌面环境及 Node.js 18 最低版本实机运行。
 
 ## 阶段里程碑与验收记录
@@ -86,7 +93,7 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs --strict-git-identity` -- 零警告通过（6/6 阶段，检查 39 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感路径/邮箱/私钥/凭据与 `docs/images/*.png` 元数据块检查、`scripts/pre-push` 语法、`origin/main..HEAD` 全部提交 noreply 身份门禁、零外部静态链接（S2）、精确模型代际（S4）、CSS 隔离、自定义域邮箱与错误诊断脱敏及 R1–R8、F1–F4、T1–T3、U1–U3 全部回归（2026-11-13 11:45 北京时间）
-- `./install.sh` -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已就地同步含隐私脱敏加固的 `1.6.3`（2026-11-13 11:03 北京时间）
-- `node scripts/package-release.mjs` + `(cd dist && LC_ALL=C shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（`140.3 KB`，20 个文件，不含 `docs/` 与 `scripts/pre-push`，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-13 11:03 北京时间）
-- `bash -n install.sh`、`bash -n scripts/pre-push` 与 `git diff --check` -- 通过（2026-11-13 11:45 北京时间）
+- `node scripts/verify.mjs --strict-git-identity` -- 零警告通过（6/6 阶段，检查 39 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感路径/邮箱/私钥/凭据与 `docs/images/*.png` 元数据块检查、`scripts/pre-push` 语法、`origin/main..HEAD` 全部提交 noreply 身份门禁、零外部静态链接（S2）、精确模型代际（S4）、CSS `--cv-*` 隔离、自定义快捷键规范化 / `Carbon` 键码 / UI 按键匹配 / 守护常驻生命周期 / Swift 类型检查及 R1–R8、F1–F4、T1–T3、U1–U3 全部回归（2026-11-13 12:57 北京时间）
+- `./install.sh` + `agy-context shortcut` 实机热切换核验 -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已同步并启动 `DAEMON_VERSION = 6` 原生守护，`⌥⌘K` 与在线热切换组合键 / 恢复默认均零重启即时生效（2026-11-13 12:57 北京时间）
+- `node scripts/package-release.mjs` + `(cd dist && shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（20 个文件，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-13 12:57 北京时间）
+- `bash -n install.sh`、`bash -n scripts/pre-push` 与 `git diff --check` -- 通过（2026-11-13 12:57 北京时间）

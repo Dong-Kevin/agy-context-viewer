@@ -45,12 +45,14 @@ node "<skill-dir>/scripts/status.mjs" --json "<conversation-id>"
      node "<skill-dir>/scripts/status.mjs" menubar off       # 关闭顶部菜单栏常驻图标
      ```
      也可直接**右键点击 macOS 顶部菜单栏图标**勾选切换，或在看板右上角调色盘设置抽屉的「菜单栏显示内容」分段按钮中一键切换。
-   - **屏幕右侧独立置顶小窗（不受右侧栏切换影响，免点 `Toggle Side Panel -> Extensions`）**：
+   - **屏幕右侧独立置顶小窗与自定义快捷键（不受右侧栏切换影响，macOS 默认 `⌥⌘K` 零辅助功能权限一键开关）**：
      ```bash
-     node "<skill-dir>/scripts/status.mjs" float           # 弹出并钉住右侧独立置顶小窗
-     node "<skill-dir>/scripts/status.mjs" float close     # 收回独立小窗
+     node "<skill-dir>/scripts/status.mjs" float                  # 弹出并钉住右侧独立置顶小窗
+     node "<skill-dir>/scripts/status.mjs" float close            # 收回独立小窗
+     node "<skill-dir>/scripts/status.mjs" shortcut               # 查看当前看板开关快捷键与生效范围
+     node "<skill-dir>/scripts/status.mjs" shortcut opt+cmd+l     # 自定义快捷键（传 reset 恢复默认 ⌥⌘K，传 off 停用，加 --global 全局生效）
      ```
-     也可点击看板右上角的 `📌` 按钮一键切换置顶 / 取消置顶。
+     也可点击看板右上角的 `📌` 按钮切换置顶，或在看板右上角调色盘设置抽屉的「侧栏看板快捷键」处直接点击按键录制。
 
 ### 在终端 `agy` CLI 中
 1. 直接汇报终端统计摘要（也可以运行不带 `--json` 的 `node "<skill-dir>/scripts/status.mjs"` 查看彩色终端进度条看板，或传 `turns` 查看逐轮消耗表）。
