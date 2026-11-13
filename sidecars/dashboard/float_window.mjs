@@ -805,21 +805,37 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
     }
   } else if (mode === 'quota') {
     const q = cx?.quota || (Array.isArray(snap?.quotas) && snap.quotas.length ? snap.quotas[0] : null);
+    const hasFiveHourObj = Boolean(q?.fiveHour);
     const p5 = isKnownNum(q?.fiveHour?.remainingPercent)
       ? q.fiveHour.remainingPercent
-      : (!q?.fiveHour && isKnownNum(q?.remainingPercent) ? q.remainingPercent : null);
+      : (!hasFiveHourObj && isKnownNum(q?.remainingPercent) ? q.remainingPercent : null);
+    const pBase = hasFiveHourObj && p5 === null
+      ? (isKnownNum(q?.baseRemainingPercent)
+          ? q.baseRemainingPercent
+          : (isKnownNum(q?.remainingPercent) ? q.remainingPercent : null))
+      : null;
     const pW = isKnownNum(q?.weekly?.remainingPercent) ? q.weekly.remainingPercent : null;
     if (p5 !== null && pW !== null) {
       const r5 = Math.max(0, Math.min(100, Math.round(p5)));
       const rW = Math.max(0, Math.min(100, Math.round(pW)));
       const icon = Math.min(r5, rW) <= 15 ? '⚠ ' : '⏳ ';
       title = `${icon}5h ${r5}%·周${rW}%`;
+    } else if (pBase !== null && pW !== null) {
+      const rB = Math.max(0, Math.min(100, Math.round(pBase)));
+      const rW = Math.max(0, Math.min(100, Math.round(pW)));
+      const icon = Math.min(rB, rW) <= 15 ? '⚠ ' : '⏳ ';
+      title = `${icon}基础 ${rB}%·周${rW}%`;
     } else if (p5 !== null) {
       const remPct = Math.max(0, Math.min(100, Math.round(p5)));
       const { winTag, countdown } = fmtQuotaWindowAndCountdown(q.fiveHour?.resetTime || q.resetTime);
       const tag = q.fiveHour ? '5h' : winTag;
       const icon = remPct <= 15 ? '⚠ ' : '⏳ ';
       title = countdown ? `${icon}${tag} ${remPct}%·${countdown}` : `${icon}${tag} ${remPct}%`;
+    } else if (pBase !== null) {
+      const remPct = Math.max(0, Math.min(100, Math.round(pBase)));
+      const { countdown } = fmtQuotaWindowAndCountdown(q.fiveHour?.resetTime || q.baseResetTime || q.resetTime);
+      const icon = remPct <= 15 ? '⚠ ' : '⏳ ';
+      title = countdown ? `${icon}基础 ${remPct}%·${countdown}` : `${icon}基础 ${remPct}%`;
     } else if (pW !== null) {
       const remPct = Math.max(0, Math.min(100, Math.round(pW)));
       const { countdown } = fmtQuotaWindowAndCountdown(q.weekly?.resetTime);
@@ -870,18 +886,32 @@ export function formatStatusItemFromSnapshot(snap, rawMode = 'context') {
   }
 
   const formatPoolLine = (poolName, obj) => {
+    const hasFiveHourObj = Boolean(obj?.fiveHour);
     const p5 = isKnownNum(obj?.fiveHour?.remainingPercent)
       ? obj.fiveHour.remainingPercent
-      : (!obj?.fiveHour && isKnownNum(obj?.remainingPercent) ? obj.remainingPercent : null);
+      : (!hasFiveHourObj && isKnownNum(obj?.remainingPercent) ? obj.remainingPercent : null);
+    const pBase = hasFiveHourObj && p5 === null
+      ? (isKnownNum(obj?.baseRemainingPercent)
+          ? obj.baseRemainingPercent
+          : (isKnownNum(obj?.remainingPercent) ? obj.remainingPercent : null))
+      : null;
     const pW = isKnownNum(obj?.weekly?.remainingPercent) ? obj.weekly.remainingPercent : null;
     if (p5 !== null && pW !== null) {
       return `${poolName}：5h ${p5}% · 周 ${pW}%`;
+    }
+    if (pBase !== null && pW !== null) {
+      return `${truncateDisplayCols(poolName, 12)}：基础 ${pBase}% · 周 ${pW}%`;
     }
     if (p5 !== null) {
       const { winTag, countdown } = fmtQuotaWindowAndCountdown(obj.fiveHour?.resetTime || obj.resetTime);
       const tag = obj.fiveHour ? '5h' : winTag;
       const rst = countdown ? ` · ${countdown} 重置` : '';
       return `${poolName} (${tag})：${p5}%${rst}`;
+    }
+    if (pBase !== null) {
+      const { countdown } = fmtQuotaWindowAndCountdown(obj.fiveHour?.resetTime || obj.baseResetTime || obj.resetTime);
+      const rst = countdown ? `·5h ${countdown}重置` : '';
+      return `${truncateDisplayCols(poolName, 12)}：基础 ${pBase}%${rst}`;
     }
     if (pW !== null) {
       const { countdown } = fmtQuotaWindowAndCountdown(obj.weekly?.resetTime);

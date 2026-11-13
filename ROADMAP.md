@@ -2,16 +2,15 @@
 
 ## 当前阶段
 
-本地未提交版本为 `v1.6.3`。[第四轮审查](docs/CODEX_REVIEW_2026-11-12_FOURTH.md) 确认 T1–T3 原始复现路径已修复，现有回归通过；组合测试仍确认 U1–U3 三项 P2，尚未修复。之前的本机安装记录保留于下方，第四轮没有重新安装。`git add / commit / tag / push` 与 GitHub Release 发布仍待明确授权。
+前三轮审查修复与 `v1.6.3` 基线已提交至本地 `main`（`1a461cb`）；[第四轮报告](docs/CODEX_REVIEW_2026-11-12_FOURTH.md) 确认的 **U1–U3** 三项 P2 组合边界均已完成修复、补齐交叉回归、覆盖安装至本机 `~/.gemini/config/plugins/context-viewer` 并提交至本地 `main`。远端 `git push / tag` 与 GitHub Release 发布仍待明确授权。
 
-## 第四轮审查结果（2026-11-12 23:23 北京时间）
+## 第四轮审查修复与验收记录（2026-11-13 09:15 北京时间）
 
-- [x] 完成 [第四轮报告](docs/CODEX_REVIEW_2026-11-12_FOURTH.md)，复核 T1–T3 并通过隔离探针确认组合边界。
-- [ ] **U1（P2）**：已有服务端容量时，手动对比基准会掩盖真实容量告警；真实 95% 可显示为 19% 且“运行健康”。
-- [ ] **U2（P2）**：切换至新模型后仍沿用上一模型的服务端容量，当前百分比归属错误。
-- [ ] **U3（P2）**：基础配额已知、摘要仅含重置时间时，网页 / 菜单栏隐藏了已知余量。
-- **下一步建议**：进入修复后先解决 U1–U3，并将报告中的交叉用例补入现有回归。本轮仅审查与文档更新，未实施业务修复。
-- **验证**：现有 `verify.mjs` 6 / 6 阶段通过（36 个源码文件），打包、SHA-256 / CRC、Shell 语法及差异检查通过；U1–U3 的额外探针复现成立。Windows / Linux 桌面及 Node.js 18 仍未实测。
+- [x] 完成 [第四轮报告](docs/CODEX_REVIEW_2026-11-12_FOURTH.md) 的根因核实、修复与交叉回归收口。
+- [x] **U1（P2）对比基准与真实服务端容量健康告警解耦**：在 [app.js](./sidecars/dashboard/app.js) 的 `computeEffectiveWindow` 新增 `serverPct`、`serverRemaining` 与 `isSameAsServer`；存在 `serverBudget` 时，`renderTopCapsules`、`hero-ring-fill`、`ctx-health-pill` 与 `ctx-takeaway` 的告警分级统一锚定真实服务端百分比 `win.serverPct`，并同时展示真实占比与对比基准折算值（正向 190K / 200K + 1M 覆盖维持「临近上限」，反向 190K / 1M + 200K 覆盖维持「运行健康」，同容量覆盖不附带冗余折算提示）。
+- [x] **U2（P2）切换模型后隔离跨模型服务端预算**：在 [collector.mjs](./sidecars/dashboard/collector.mjs) 抽离 `isTurnMatchingCurrentModel`，逆序查找与 `currentModelKey` / `currentModelDisplay` 匹配的轮次预算，确保切换至未出轮次新模型或无 `maxContextTokens` 模型时 `budget` 返回 `null`、`budgetSource` 返回 `unknown`，同模型续问或切回曾记录预算的模型时准确恢复对应预算。
+- [x] **U3（P2）基础配额与仅含重置时间的多窗口摘要解耦展示**：在 [pricing.mjs](./sidecars/dashboard/pricing.mjs) 为 `buildQuotaPools` 与 `resolveModelQuota` 显式保留 `baseRemainingFraction`、`baseRemainingPercent`、`baseResetTime` 与 `baseResetTimeZh`；在 [app.js](./sidecars/dashboard/app.js) 抽离 `extractQuotaParts` 更新 Tab 1 与 Tab 3，在 [float_window.mjs](./sidecars/dashboard/float_window.mjs) 兼容菜单栏标题与 Tooltip（保留原有遗留单窗 0% 兼容逻辑且 Tooltip 单行 `<= 38` 显示列），在 [cli.mjs](./sidecars/dashboard/cli.mjs) 的 JSON 摘要补充 `basePercent` 并适配终端渲染，显式 5h 百分比摘要仍优先于基础配额。
+- **验证覆盖**：U1–U3 全链路与交叉边界回归已合入 [scripts/verify.mjs](./scripts/verify.mjs)（`6 / 6` 阶段通过，37 个源码文件）。Windows / Linux 桌面及 Node.js 18 运行时仍为未实测项。
 
 ## 第三轮审查修复与验收记录（2026-11-12 23:03 北京时间）
 
@@ -78,7 +77,7 @@
 
 ## 最近验证
 
-- `node scripts/verify.mjs` -- 通过（6/6 阶段，检查 36 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感模式与 `docs/images/*.png` 元数据块检查、零外部静态链接（S2）、精确模型代际（S4）、CSS 隔离及 R1–R8、F1–F4、T1–T3 全部全链路行为回归（2026-11-12 23:03 北京时间）
-- `./install.sh` -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已就地同步含 T1–T3 修复的 `1.6.3`（`DAEMON_BUILD_ID` 自动触发菜单栏守护热升级，2026-11-12 23:03 北京时间）
-- `node scripts/package-release.mjs` + `(cd dist && LC_ALL=C shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（`138.5 KB`，20 个文件，不含 `docs/`，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-12 23:03 北京时间）
-- `bash -n install.sh` 与 `git diff --check` -- 通过（2026-11-12 23:03 北京时间）
+- `node scripts/verify.mjs` -- 通过（6/6 阶段，检查 37 个源码文件，当前版本 `v1.6.3`），覆盖清单与语法、敏感模式与 `docs/images/*.png` 元数据块检查、零外部静态链接（S2）、精确模型代际（S4）、CSS 隔离及 R1–R8、F1–F4、T1–T3、U1–U3 全部全链路与交叉组合回归（2026-11-13 09:15 北京时间）
+- `./install.sh` -- 通过，本机 `~/.gemini/config/plugins/context-viewer` 已就地同步含 U1–U3 修复的 `1.6.3`（`DAEMON_BUILD_ID` 自动触发菜单栏守护热升级，2026-11-13 09:15 北京时间）
+- `node scripts/package-release.mjs` + `(cd dist && LC_ALL=C shasum -a 256 -c context-viewer-v1.6.3.zip.sha256)` + Python `zipfile` 独立校验 -- 通过，生成 `dist/context-viewer-v1.6.3.zip`（`139.6 KB`，20 个文件，不含 `docs/`，CRC 无损，包内 README 图片地址已重写至 `v1.6.3` 版本 tag，2026-11-13 09:15 北京时间）
+- `bash -n install.sh` 与 `git diff --check` -- 通过（2026-11-13 09:15 北京时间）

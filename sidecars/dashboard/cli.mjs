@@ -356,16 +356,21 @@ function buildCompactSummary(ctx, hist) {
     },
     quotaStatus: hist.quotaStatus || ctx.quotaStatus || null,
     quotas: (hist.modelQuotas || []).map((q) => {
-      const p5 = typeof q.fiveHour?.remainingPercent === 'number'
-        ? q.fiveHour.remainingPercent
-        : (!q.fiveHour && typeof q.remainingPercent === 'number' ? q.remainingPercent : null);
+      const p5 = typeof q.fiveHour?.remainingPercent === 'number' ? q.fiveHour.remainingPercent : null;
+      const pBase = p5 === null
+        ? (typeof q.baseRemainingPercent === 'number'
+            ? q.baseRemainingPercent
+            : (typeof q.remainingPercent === 'number' ? q.remainingPercent : null))
+        : null;
       const pW = typeof q.weekly?.remainingPercent === 'number' ? q.weekly.remainingPercent : null;
+      const eff5 = p5 ?? pBase;
       return {
         label: q.title || q.groupLabel || q.label || '模型配额池',
-        remainingPercent: p5 !== null && pW !== null ? Math.min(p5, pW) : (p5 ?? pW ?? null),
+        remainingPercent: eff5 !== null && pW !== null ? Math.min(eff5, pW) : (eff5 ?? pW ?? null),
         fiveHourPercent: p5,
+        basePercent: pBase,
         weeklyPercent: pW,
-        resetText: q.fiveHour?.resetTimeZh || q.weekly?.resetTimeZh || q.resetTimeZh || q.resetCountdown || ''
+        resetText: q.fiveHour?.resetTimeZh || q.weekly?.resetTimeZh || q.baseResetTimeZh || q.resetTimeZh || q.resetCountdown || ''
       };
     })
   };
@@ -420,8 +425,12 @@ function printPrettyStatus(ctx, hist) {
       let pctCol = '余量未知';
       if (q.fiveHourPercent !== null && q.weeklyPercent !== null) {
         pctCol = `5h ${q.fiveHourPercent}% · 周 ${q.weeklyPercent}%`;
+      } else if (q.basePercent !== null && q.weeklyPercent !== null) {
+        pctCol = `基础 ${q.basePercent}% · 周 ${q.weeklyPercent}%`;
       } else if (q.fiveHourPercent !== null) {
         pctCol = `${String(q.fiveHourPercent).padStart(5)}%`;
+      } else if (q.basePercent !== null) {
+        pctCol = `基础 ${q.basePercent}%`;
       } else if (q.weeklyPercent !== null) {
         pctCol = `周 ${q.weeklyPercent}%`;
       }

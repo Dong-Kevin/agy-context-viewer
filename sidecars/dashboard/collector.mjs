@@ -1805,7 +1805,18 @@ export async function scanConversation(requestedConvId = '', options = {}) {
     ? (latestTurn?.estimate || latestValidTurn?.totalTokens || null)
     : (latestValidTurn?.totalTokens ?? latestTurn?.estimate ?? null);
   const usedTokens = baseUsedTokens !== null ? baseUsedTokens + pendingTokens : null;
-  const budgetTokens = latestTurn?.budget || latestValidTurn?.budget || null;
+  const curNormDisplay = String(currentModelDisplay || '').trim().toLowerCase();
+  const isTurnMatchingCurrentModel = (t) => {
+    if (!t || !(t.budget > 0)) return false;
+    if (!switchedAfterLatestTurn && t === latestTurn) return true;
+    if (currentModelKey && t.modelKey && t.modelKey === currentModelKey) return true;
+    if (t.hasRecordedModel && curNormDisplay && curNormDisplay !== '未记录模型') {
+      return String(t.model || '').trim().toLowerCase() === curNormDisplay;
+    }
+    return false;
+  };
+  const matchedBudgetTurn = [...turns].reverse().find(isTurnMatchingCurrentModel);
+  const budgetTokens = matchedBudgetTurn?.budget || null;
   const budgetSource = budgetTokens ? 'server' : 'unknown';
   const remainingTokens = usedTokens !== null && budgetTokens !== null && budgetTokens > 0
     ? Math.max(0, budgetTokens - usedTokens)

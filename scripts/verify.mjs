@@ -740,6 +740,82 @@ async function main() {
     `T1 真实 0% 配额未渲染为 0.0% 告警态：${zeroListHtml}`
   );
 
+  // U3: Base quota known (40% or 0%) + reset-only 5h summary bucket must NOT mask known base quota
+  const u3FiveReset = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+  const u3Configs = [
+    {
+      label: 'U3 Base 40 Reset5h',
+      modelId: 'U3_BASE_40',
+      quotaInfo: { poolId: 'u3-p-40', remainingFraction: 0.4, resetTime: u3FiveReset }
+    },
+    {
+      label: 'U3 Base 0 Reset5h',
+      modelId: 'U3_BASE_0',
+      quotaInfo: { poolId: 'u3-p-0', remainingFraction: 0, resetTime: u3FiveReset }
+    },
+    {
+      label: 'U3 Explicit 5h 80',
+      modelId: 'U3_EXP_80',
+      quotaInfo: { poolId: 'u3-p-80', remainingFraction: 0.4, resetTime: u3FiveReset }
+    }
+  ];
+  const u3Groups = [
+    { groupId: 'u3-p-40', modelIds: ['U3_BASE_40'], buckets: [{ window: '5h', resetTime: u3FiveReset }] },
+    { groupId: 'u3-p-0', modelIds: ['U3_BASE_0'], buckets: [{ window: '5h', resetTime: u3FiveReset }] },
+    { groupId: 'u3-p-80', modelIds: ['U3_EXP_80'], buckets: [{ window: '5h', remainingFraction: 0.8, resetTime: u3FiveReset }] }
+  ];
+  const u3Pools = groupModelQuotas(u3Configs, u3Groups);
+  const findU3Pool = (lbl) => u3Pools.find((p) => p.families.includes(lbl));
+  const u3Base40Pool = findU3Pool('U3 Base 40 Reset5h');
+  const u3Base0Pool = findU3Pool('U3 Base 0 Reset5h');
+  const u3Exp80Pool = findU3Pool('U3 Explicit 5h 80');
+  const u3Base40ModelQ = resolveModelQuota('U3 Base 40 Reset5h', u3Configs, u3Groups);
+  const u3Base0ModelQ = resolveModelQuota('U3 Base 0 Reset5h', u3Configs, u3Groups);
+  const u3Exp80ModelQ = resolveModelQuota('U3 Explicit 5h 80', u3Configs, u3Groups);
+  assert(
+    u3Base40Pool?.baseRemainingPercent === 40 &&
+      u3Base40Pool?.fiveHour?.remainingPercent === null &&
+      u3Base0Pool?.baseRemainingPercent === 0 &&
+      u3Base0Pool?.fiveHour?.remainingPercent === null &&
+      u3Exp80Pool?.remainingPercent === 80 &&
+      u3Exp80Pool?.fiveHour?.remainingPercent === 80 &&
+      u3Base40ModelQ?.baseRemainingPercent === 40 &&
+      u3Base0ModelQ?.baseRemainingPercent === 0 &&
+      u3Exp80ModelQ?.fiveHour?.remainingPercent === 80,
+    `U3 基础配额 + 重置时间摘要解析异常：40=${JSON.stringify(u3Base40Pool)}, 0=${JSON.stringify(u3Base0Pool)}`
+  );
+  t1Harness.vmCtx.renderCostPanel({
+    planStatus: { status: 'identified', tierName: 'Pro' },
+    modelQuotas: [u3Base40Pool, u3Base0Pool, u3Exp80Pool]
+  });
+  const u3CostHtml = t1Harness.getEl('quota-pools-list').innerHTML;
+  assert(
+    u3CostHtml.includes('基础配额窗口') &&
+      u3CostHtml.includes('40.0%') &&
+      u3CostHtml.includes('0.0%') &&
+      u3CostHtml.includes('80.0%') &&
+      u3CostHtml.includes('var(--danger)'),
+    `U3 Tab3 基础配额未在仅含重置时间摘要时保留展示：${u3CostHtml}`
+  );
+  t1Harness.vmCtx.renderSpeedCard(null, { quota: u3Base40ModelQ }, [], null);
+  assert(
+    t1Harness.getEl('ctx-quota-val').textContent.includes('基础 40.0%') &&
+      t1Harness.getEl('ctx-quota-bar').style.width === '40%',
+    `U3 Tab1 基础 40% + reset-only 5h 显示异常：${t1Harness.getEl('ctx-quota-val').textContent}`
+  );
+  t1Harness.vmCtx.renderSpeedCard(null, { quota: u3Base0ModelQ }, [], null);
+  assert(
+    t1Harness.getEl('ctx-quota-val').textContent.includes('基础 0.0%') &&
+      t1Harness.getEl('ctx-quota-bar').style.width === '0%',
+    `U3 Tab1 基础 0% + reset-only 5h 显示异常：${t1Harness.getEl('ctx-quota-val').textContent}`
+  );
+  t1Harness.vmCtx.renderSpeedCard(null, { quota: u3Exp80ModelQ }, [], null);
+  assert(
+    t1Harness.getEl('ctx-quota-val').textContent.includes('5h 80.0%') &&
+      !t1Harness.getEl('ctx-quota-val').textContent.includes('基础 40.0%'),
+    `U3 Tab1 显式 5h 摘要应优先于基础配额：${t1Harness.getEl('ctx-quota-val').textContent}`
+  );
+
   console.log('[verify] 5/6 执行隔离采集器回归测试（R3/T2 配额状态机与 ETag / R5 离线计费 / R6 版本号 / R8 中文路径 / F1-F2 / T3 预算上限）...');
   const tmpVerifyRoot = mkdtempSync(join(tmpdir(), 'ag-cv-verify-'));
   const savedEnv = {
@@ -1293,11 +1369,226 @@ async function main() {
           t3Harness.getEl('ctx-health-pill').textContent === '运行健康',
         'T3 服务端真实上限 Auto 模式渲染异常'
       );
+
+      // U1: Manual benchmark must NEVER mask or fabricate real server health alerts
+      const u1NearFullSnap = {
+        ...t3ServerSnap,
+        context: {
+          ...t3ServerSnap.context,
+          used: 190000,
+          budget: 200000,
+          budgetSource: 'server',
+          remaining: 10000,
+          percent: 95
+        }
+      };
+      t3Harness.vmCtx.state.contextData = u1NearFullSnap;
+      t3Harness.vmCtx.state.ui.budgetOverride = 1000000;
+      t3Harness.vmCtx.renderTopCapsules();
+      t3Harness.vmCtx.renderContextPanel(u1NearFullSnap);
+      assert(
+        t3Harness.getEl('ctx-pct-big').textContent === '19.0%' &&
+          t3Harness.getEl('ctx-budget-sub').textContent.includes('服务端默认 200.0K') &&
+          t3Harness.getEl('ctx-health-pill').textContent === '临近上限' &&
+          t3Harness.getEl('ctx-health-pill').className.includes('danger') &&
+          t3Harness.getEl('hero-ring-fill').style.stroke === 'var(--danger)' &&
+          t3Harness.getEl('mini-ring-fill').style.stroke === 'var(--danger)' &&
+          t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
+          t3Harness.getEl('ctx-takeaway').textContent.includes('95.0%') &&
+          !t3Harness.getEl('ctx-takeaway').textContent.includes('上下文容量充裕'),
+        `U1 真实 95% 被 1M 对比基准掩盖：pill=${t3Harness.getEl('ctx-health-pill').textContent}, takeaway=${t3Harness.getEl('ctx-takeaway').textContent}`
+      );
+      // U1 reverse: real 19% (1M server) + 200K override must remain healthy instead of false danger alert
+      const u1LowRatioSnap = {
+        ...t3ServerSnap,
+        context: {
+          ...t3ServerSnap.context,
+          used: 190000,
+          budget: 1000000,
+          budgetSource: 'server',
+          remaining: 810000,
+          percent: 19
+        }
+      };
+      t3Harness.vmCtx.state.contextData = u1LowRatioSnap;
+      t3Harness.vmCtx.state.ui.budgetOverride = 200000;
+      t3Harness.vmCtx.renderTopCapsules();
+      t3Harness.vmCtx.renderContextPanel(u1LowRatioSnap);
+      assert(
+        t3Harness.getEl('ctx-pct-big').textContent === '95.0%' &&
+          t3Harness.getEl('ctx-health-pill').textContent === '运行健康' &&
+          t3Harness.getEl('hero-ring-fill').style.stroke === 'var(--cv-accent)' &&
+          !t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
+          !t3Harness.getEl('ctx-takeaway').classList.contains('warn') &&
+          t3Harness.getEl('ctx-takeaway').textContent.includes('19.0%'),
+        `U1 反向组合（真实 19% + 200K 基准）产生误告警：pill=${t3Harness.getEl('ctx-health-pill').textContent}`
+      );
+      // U1 equal: 200K server + 200K override should behave as direct 95% alert without redundant note
+      t3Harness.vmCtx.state.contextData = u1NearFullSnap;
+      t3Harness.vmCtx.state.ui.budgetOverride = 200000;
+      t3Harness.vmCtx.renderContextPanel(u1NearFullSnap);
+      assert(
+        t3Harness.getEl('ctx-health-pill').textContent === '临近上限' &&
+          t3Harness.getEl('ctx-takeaway').classList.contains('danger') &&
+          !t3Harness.getEl('ctx-takeaway').textContent.includes('对比基准折算'),
+        `U1 同容量覆盖不应附带冗余折算提示：${t3Harness.getEl('ctx-takeaway').textContent}`
+      );
+      t3Harness.vmCtx.state.ui.budgetOverride = 0;
     } finally {
       delete process.env.ANTIGRAVITY_LS_ADDRESS;
       delete process.env.ANTIGRAVITY_CSRF_TOKEN;
       await new Promise((r) => t3GenServer.close(r));
       rmSync(join(isolatedAgDir, 'brain', t3ConvId), { recursive: true, force: true });
+    }
+
+    // U2: Switching models must NEVER inherit the previous model's server budget
+    const u2ConvId = 'b2000000-0000-4000-8000-000000000002';
+    const u2LogDir = join(isolatedAgDir, 'brain', u2ConvId, '.system_generated', 'logs');
+    mkdirSync(u2LogDir, { recursive: true });
+    let u2Phase = 1;
+    const u2Server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
+        const meta = [
+          {
+            stepIndices: [1],
+            chatModel: {
+              model: 'Claude Sonnet 4.6',
+              usage: { inputTokens: 15000, outputTokens: 1000 },
+              chatStartMetadata: {
+                contextWindowMetadata: { maxContextTokens: 200000, estimatedTokensUsed: 16000 }
+              }
+            }
+          }
+        ];
+        if (u2Phase >= 2) {
+          meta.push({
+            stepIndices: [3],
+            chatModel: {
+              model: 'Custom Unknown B',
+              usage: { inputTokens: 49000, outputTokens: 1000 },
+              chatStartMetadata: {
+                contextWindowMetadata: { estimatedTokensUsed: 50000 }
+              }
+            }
+          });
+        }
+        if (u2Phase >= 4) {
+          meta.push({
+            stepIndices: [5],
+            chatModel: {
+              model: 'Claude Opus 5.5',
+              usage: { inputTokens: 58000, outputTokens: 2000 },
+              chatStartMetadata: {
+                contextWindowMetadata: { maxContextTokens: 1000000, estimatedTokensUsed: 60000 }
+              }
+            }
+          });
+        }
+        res.end(JSON.stringify({ generatorMetadata: meta }));
+        return;
+      }
+      res.end('{}');
+    });
+    await new Promise((r) => u2Server.listen(0, '127.0.0.1', r));
+    try {
+      process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${u2Server.address().port}`;
+      process.env.ANTIGRAVITY_CSRF_TOKEN = 'u2-ls-csrf';
+      const writeU2Steps = (steps) => {
+        writeFileSync(
+          join(u2LogDir, 'transcript.jsonl'),
+          steps.map((s) => JSON.stringify(s)).join('\n') + '\n',
+          'utf-8'
+        );
+      };
+      // Phase 1: Switch from Claude Sonnet 4.6 (200K) to Custom Unknown B before Unknown B responds
+      writeU2Steps([
+        { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:00:00Z', content: 'start with sonnet' },
+        { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:00:05Z', model: 'Claude Sonnet 4.6', content: 'sonnet reply' },
+        { step_index: 2, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:01:00Z', content: 'Model Selection from Claude Sonnet 4.6 to Custom Unknown B.\nhi unknown b' }
+      ]);
+      const u2Snap1 = await scanConversation(u2ConvId, { force: true });
+      assert(
+        u2Snap1.context?.model === 'Custom Unknown B' &&
+          u2Snap1.context?.budget === null &&
+          u2Snap1.context?.budgetSource === 'unknown' &&
+          u2Snap1.context?.percent === null,
+        `U2 切换至未知模型(未出轮次)竟继承上一模型预算：${JSON.stringify(u2Snap1.context)}`
+      );
+
+      // Phase 2: Unknown B responds without maxContextTokens (latestValidTurn is still Model A!)
+      u2Phase = 2;
+      writeU2Steps([
+        { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:00:00Z', content: 'start with sonnet' },
+        { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:00:05Z', model: 'Claude Sonnet 4.6', content: 'sonnet reply' },
+        { step_index: 2, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:01:00Z', content: 'Model Selection from Claude Sonnet 4.6 to Custom Unknown B.\nhi unknown b' },
+        { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:01:10Z', model: 'Custom Unknown B', content: 'unknown b reply' }
+      ]);
+      const u2Snap2 = await scanConversation(u2ConvId, { force: true });
+      assert(
+        u2Snap2.context?.model === 'Custom Unknown B' &&
+          u2Snap2.context?.budget === null &&
+          u2Snap2.context?.budgetSource === 'unknown',
+        `U2 无预算模型已响应时竟回退继承 Model A 预算：${JSON.stringify(u2Snap2.context)}`
+      );
+
+      // Phase 3: Switch to Claude Opus 5.5 before Opus 5.5 responds -> must still be unknown
+      u2Phase = 3;
+      writeU2Steps([
+        { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:00:00Z', content: 'start with sonnet' },
+        { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:00:05Z', model: 'Claude Sonnet 4.6', content: 'sonnet reply' },
+        { step_index: 2, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:01:00Z', content: 'Model Selection from Claude Sonnet 4.6 to Custom Unknown B.\nhi unknown b' },
+        { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:01:10Z', model: 'Custom Unknown B', content: 'unknown b reply' },
+        { step_index: 4, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:02:00Z', content: 'Model Selection from Custom Unknown B to Claude Opus 5.5.\nhi opus' }
+      ]);
+      const u2Snap3 = await scanConversation(u2ConvId, { force: true });
+      assert(
+        u2Snap3.context?.model === 'Claude Opus 5.5' && u2Snap3.context?.budget === null,
+        `U2 切至 Opus 5.5 首轮完成前不应伪造预算：${JSON.stringify(u2Snap3.context)}`
+      );
+
+      // Phase 4 & 5: Opus 5.5 finishes with 1M budget, then user sends next message on same Opus 5.5 -> retains 1M
+      u2Phase = 4;
+      writeU2Steps([
+        { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:00:00Z', content: 'start with sonnet' },
+        { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:00:05Z', model: 'Claude Sonnet 4.6', content: 'sonnet reply' },
+        { step_index: 2, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:01:00Z', content: 'Model Selection from Claude Sonnet 4.6 to Custom Unknown B.\nhi unknown b' },
+        { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:01:10Z', model: 'Custom Unknown B', content: 'unknown b reply' },
+        { step_index: 4, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:02:00Z', content: 'Model Selection from Custom Unknown B to Claude Opus 5.5.\nhi opus' },
+        { step_index: 5, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:02:10Z', model: 'Claude Opus 5.5', content: 'opus reply' },
+        { step_index: 6, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:03:00Z', content: 'follow up on same model' }
+      ]);
+      const u2Snap4 = await scanConversation(u2ConvId, { force: true });
+      assert(
+        u2Snap4.context?.model === 'Claude Opus 5.5' &&
+          u2Snap4.context?.budget === 1000000 &&
+          u2Snap4.context?.budgetSource === 'server',
+        `U2 同模型后续提问应保留 1M 预算：${JSON.stringify(u2Snap4.context)}`
+      );
+
+      // Phase 6: Switching back to earlier Claude Sonnet 4.6 restores its own 200K budget (not Opus's 1M)
+      writeU2Steps([
+        { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:00:00Z', content: 'start with sonnet' },
+        { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:00:05Z', model: 'Claude Sonnet 4.6', content: 'sonnet reply' },
+        { step_index: 2, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:01:00Z', content: 'Model Selection from Claude Sonnet 4.6 to Custom Unknown B.\nhi unknown b' },
+        { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:01:10Z', model: 'Custom Unknown B', content: 'unknown b reply' },
+        { step_index: 4, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:02:00Z', content: 'Model Selection from Custom Unknown B to Claude Opus 5.5.\nhi opus' },
+        { step_index: 5, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-12T10:02:10Z', model: 'Claude Opus 5.5', content: 'opus reply' },
+        { step_index: 6, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:03:00Z', content: 'follow up on same model' },
+        { step_index: 7, type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-12T10:04:00Z', content: 'Model Selection from Claude Opus 5.5 to Claude Sonnet 4.6.\nback to sonnet' }
+      ]);
+      const u2Snap5 = await scanConversation(u2ConvId, { force: true });
+      assert(
+        u2Snap5.context?.model === 'Claude Sonnet 4.6' &&
+          u2Snap5.context?.budget === 200000 &&
+          u2Snap5.context?.budgetSource === 'server',
+        `U2 切回曾运行过的 Sonnet 4.6 应恢复其自身 200K 预算：${JSON.stringify(u2Snap5.context)}`
+      );
+    } finally {
+      delete process.env.ANTIGRAVITY_LS_ADDRESS;
+      delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+      await new Promise((r) => u2Server.close(r));
+      rmSync(join(isolatedAgDir, 'brain', u2ConvId), { recursive: true, force: true });
     }
 
     // R8: Windows PowerShell Unicode-safe Base64 loader shim in non-ASCII + space directory
@@ -1470,6 +1761,31 @@ async function main() {
       let cols = 0;
       for (const ch of line) cols += (ch.codePointAt(0) || 0) > 0x2e7f ? 2 : 1;
       assert(cols <= 38, `T2/T3 tooltip 单行超宽（${cols} cols）：${line}`);
+    }
+    const fmtU3Base40 = formatStatusItemFromSnapshot({
+      ...mockSnap,
+      quotas: [u3Base40Pool],
+      context: { ...mockSnap.context, quota: u3Base40ModelQ }
+    }, 'quota');
+    assert(
+      fmtU3Base40.title.startsWith('⏳ 基础 40%') &&
+        fmtU3Base40.tooltip.includes('基础 40%') &&
+        !fmtU3Base40.tooltip.includes('余量未知'),
+      `U3 菜单栏基础 40% + reset-only 5h 被隐藏：${fmtU3Base40.title} / ${fmtU3Base40.tooltip}`
+    );
+    const fmtU3Base0 = formatStatusItemFromSnapshot({
+      ...mockSnap,
+      quotas: [u3Base0Pool],
+      context: { ...mockSnap.context, quota: u3Base0ModelQ }
+    }, 'quota');
+    assert(
+      fmtU3Base0.title.startsWith('⚠ 基础 0%') && fmtU3Base0.tooltip.includes('基础 0%'),
+      `U3 菜单栏基础 0% + reset-only 5h 未触发告警：${fmtU3Base0.title} / ${fmtU3Base0.tooltip}`
+    );
+    for (const line of [...fmtU3Base40.tooltip.split('\n'), ...fmtU3Base0.tooltip.split('\n')]) {
+      let cols = 0;
+      for (const ch of line) cols += (ch.codePointAt(0) || 0) > 0x2e7f ? 2 : 1;
+      assert(cols <= 38, `U3 tooltip 单行超宽（${cols} cols）：${line}`);
     }
 
     const cliOut = execFileSync(process.execPath, [join(ROOT, 'skills', 'context-viewer', 'scripts', 'status.mjs'), '--json'], {

@@ -473,6 +473,33 @@
     return typeof val === 'number' && Number.isFinite(val);
   }
 
+  function extractQuotaParts(obj) {
+    if (!obj) {
+      return {
+        p5: null,
+        pBase: null,
+        pW: null,
+        r5: '',
+        rBase: '',
+        rW: '',
+        rAny: '',
+        primaryResetTime: null
+      };
+    }
+    const p5 = isKnownPct(obj.fiveHour?.remainingPercent) ? obj.fiveHour.remainingPercent : null;
+    const rawBase = isKnownPct(obj.baseRemainingPercent)
+      ? obj.baseRemainingPercent
+      : (p5 === null && isKnownPct(obj.remainingPercent) ? obj.remainingPercent : null);
+    const pBase = p5 === null ? rawBase : null;
+    const pW = isKnownPct(obj.weekly?.remainingPercent) ? obj.weekly.remainingPercent : null;
+    const r5 = obj.fiveHour?.resetTimeZh || '';
+    const rBase = obj.baseResetTimeZh || (!obj.fiveHour ? obj.resetTimeZh : '') || '';
+    const rW = obj.weekly?.resetTimeZh || '';
+    const rAny = r5 || rW || rBase || obj.resetTimeZh || '';
+    const primaryResetTime = obj.fiveHour?.resetTime || obj.weekly?.resetTime || obj.baseResetTime || obj.resetTime || null;
+    return { p5, pBase, pW, r5, rBase, rW, rAny, primaryResetTime };
+  }
+
   function fmtSyncClock(isoStr) {
     if (!isoStr) return '';
     const dt = new Date(isoStr);
@@ -494,15 +521,33 @@
     const serverBudget = Number.isFinite(rawServerBudget) && rawServerBudget > 0 ? rawServerBudget : null;
     const isOverridden = Number(state.ui.budgetOverride) > 0;
     const budget = isOverridden ? Number(state.ui.budgetOverride) : serverBudget;
+    const isSameAsServer = isOverridden && serverBudget !== null && budget === serverBudget;
     const budgetSource = isOverridden ? 'user' : (serverBudget ? (ctx?.budgetSource || 'server') : 'unknown');
     const used = typeof ctx?.used === 'number' && Number.isFinite(ctx.used) ? ctx.used : null;
     const pct = used !== null && budget !== null && budget > 0
       ? Number(((used / budget) * 100).toFixed(1))
       : null;
+    const serverPct = used !== null && serverBudget !== null && serverBudget > 0
+      ? Number(((used / serverBudget) * 100).toFixed(1))
+      : null;
     const remaining = used !== null && budget !== null && budget > 0
       ? Math.max(0, budget - used)
       : null;
-    return { budget, serverBudget, budgetSource, used, pct, remaining, isOverridden };
+    const serverRemaining = used !== null && serverBudget !== null && serverBudget > 0
+      ? Math.max(0, serverBudget - used)
+      : null;
+    return {
+      budget,
+      serverBudget,
+      budgetSource,
+      used,
+      pct,
+      serverPct,
+      remaining,
+      serverRemaining,
+      isOverridden,
+      isSameAsServer
+    };
   }
 
   function renderTopCapsules() {
@@ -512,6 +557,7 @@
 
     const win = computeEffectiveWindow(ctx);
     const pct = win.pct;
+    const healthPct = win.serverBudget ? win.serverPct : pct;
     setText('cap-ctx-pct', pct !== null ? `${pct.toFixed(0)}%` : (win.used !== null ? fmtTokens(win.used) : '--%'));
 
     const miniRing = $('mini-ring-fill');
@@ -519,7 +565,7 @@
       const circum = 45.24; // 2 * PI * 7.2
       const ratio = pct !== null ? Math.min(1, Math.max(0, pct / 100)) : 0;
       miniRing.setAttribute('stroke-dasharray', `${(ratio * circum).toFixed(2)} ${circum}`);
-      miniRing.style.stroke = resolveHealthStroke(pct, ctx?.error?.kind);
+      miniRing.style.stroke = resolveHealthStroke(healthPct, ctx?.error?.kind);
     }
 
     const tps = spd?.tps ?? spd?.streamingTps ?? null;
@@ -590,6 +636,8 @@
       `${fmtInt(audit.turnsCount || 0)} 轮响应 · ${fmtInt(audit.totalSteps || 0)} 步 · ${fmtInt(audit.toolCallsCount || 0)} 次工具`
     );
 
+    const healthPct = win.serverBudget ? win.serverPct : pct;
+
     // Health status pill
     const pill = $('ctx-health-pill');
     if (pill) {
@@ -601,16 +649,16 @@
       } else if (win.used === null) {
         cls = 'neutral';
         label = '待首轮请求';
-      } else if (pct === null) {
+      } else if (healthPct === null) {
         cls = 'neutral';
         label = '容量未知';
       } else if (win.isOverridden && !win.serverBudget) {
         cls = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : 'neutral';
         label = pct >= 90 ? '近对比基准' : pct >= 75 ? '超对比 75%' : '按对比基准';
-      } else if (pct >= 90) {
+      } else if (healthPct >= 90) {
         cls = 'danger';
         label = '临近上限';
-      } else if (pct >= 75) {
+      } else if (healthPct >= 75) {
         cls = 'warn';
         label = '占用偏高';
       }
@@ -631,7 +679,7 @@
     if (heroFill) {
       const ratio = pct !== null ? Math.min(1, Math.max(0, pct / 100)) : 0;
       heroFill.setAttribute('stroke-dasharray', `${(ratio * circum).toFixed(2)} ${circum}`);
-      heroFill.style.stroke = resolveHealthStroke(pct, err.kind);
+      heroFill.style.stroke = resolveHealthStroke(healthPct, err.kind);
     }
     if (heroCache) {
       const cacheRatio = win.budget && win.budget > 0 && ctx.cacheTokens
@@ -657,7 +705,7 @@
       'ctx-budget-sub',
       win.isOverridden
         ? (win.serverBudget ? `服务端默认 ${fmtTokens(win.serverBudget, 0)}` : '用户对比基准（非服务端阈值）')
-        : (win.budget ? '自动压缩阈值' : '归档未记录窗口容量')
+        : (win.budget ? '自动压缩阈值' : '当前模型上限未知')
     );
     setText('ctx-rem', win.remaining !== null ? fmtTokens(win.remaining) : '--');
     setText(
@@ -694,7 +742,7 @@
         setText(takeaway, `${err.title}：${err.detail}`);
       } else if (win.used === null) {
         setText(takeaway, `当前会话（${snap.conversationTitle}）暂无已完成模型轮次；发送消息后自动同步精确窗口占用。`);
-      } else if (pct === null) {
+      } else if (healthPct === null) {
         setText(
           takeaway,
           `当前会话已用 ${fmtTokens(win.used)} Token；本地归档未记录该模型窗口容量上限，暂不推导健康百分比（可在上方选择 200K / 256K / 1M 作为对比基准）。`
@@ -706,17 +754,31 @@
           takeaway,
           `当前会话已用 ${fmtTokens(win.used)} Token，按所选 ${fmtTokens(win.budget, 0)} 对比基准折算为 ${pct.toFixed(1)}%（剩余 ${fmtTokens(win.remaining)}，非服务端压缩阈值）。`
         );
-      } else if (pct >= 88) {
-        takeaway.classList.add('danger');
-        setText(takeaway, `当前窗口已使用 ${pct.toFixed(1)}%，接近上限阈值，建议适时执行 /compact 或拆分新会话以保持响应速度。`);
-      } else if (pct >= 72) {
-        takeaway.classList.add('warn');
-        setText(takeaway, `当前窗口已用 ${pct.toFixed(1)}%，缓存命中率 ${ctx.cacheHitPercent ?? 0}%，后续长输出轮次可能触发自动摘要。`);
       } else {
-        const cacheNote = ctx.cacheHitPercent !== null && ctx.cacheHitPercent >= 50
-          ? `缓存命中高达 ${ctx.cacheHitPercent.toFixed(1)}%，显著降低首字延迟与折算成本。`
-          : '上下文容量充裕，推理与工具调用处于最佳窗口区间。';
-        setText(takeaway, `会话「${snap.conversationTitle}」窗口健康（已用 ${fmtTokens(win.used)} / ${fmtTokens(win.budget)}）。${cacheNote}`);
+        const compareNote = win.isOverridden && !win.isSameAsServer && pct !== null
+          ? `（当前按 ${fmtTokens(win.budget, 0)} 对比基准折算为 ${pct.toFixed(1)}%）`
+          : '';
+        if (healthPct >= 88) {
+          takeaway.classList.add('danger');
+          const realPrefix = compareNote
+            ? `当前真实窗口已使用 ${win.serverPct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget)}）`
+            : `当前窗口已使用 ${healthPct.toFixed(1)}%`;
+          setText(takeaway, `${realPrefix}，接近上限阈值，建议适时执行 /compact 或拆分新会话以保持响应速度。${compareNote}`);
+        } else if (healthPct >= 72) {
+          takeaway.classList.add('warn');
+          const realPrefix = compareNote
+            ? `当前真实窗口已用 ${win.serverPct.toFixed(1)}%（${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget)}）`
+            : `当前窗口已用 ${healthPct.toFixed(1)}%`;
+          setText(takeaway, `${realPrefix}，缓存命中率 ${ctx.cacheHitPercent ?? 0}%，后续长输出轮次可能触发自动摘要。${compareNote}`);
+        } else {
+          const cacheNote = ctx.cacheHitPercent !== null && ctx.cacheHitPercent >= 50
+            ? `缓存命中高达 ${ctx.cacheHitPercent.toFixed(1)}%，显著降低首字延迟与折算成本。`
+            : '上下文容量充裕，推理与工具调用处于最佳窗口区间。';
+          const realSummary = compareNote
+            ? `真实窗口健康（${win.serverPct.toFixed(1)}%，已用 ${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget)}）`
+            : `窗口健康（已用 ${fmtTokens(win.used)} / ${fmtTokens(win.serverBudget || win.budget)}）`;
+          setText(takeaway, `会话「${snap.conversationTitle}」${realSummary}。${cacheNote}${compareNote}`);
+        }
       }
     }
 
@@ -856,23 +918,23 @@
           : (quotaStatus?.summaryStale ? '（摘要降级）' : '');
         setText('ctx-quota-title', `${q.label || '当前模型'} 配额余量${staleTag}`);
 
-        const p5 = isKnownPct(q.fiveHour?.remainingPercent)
-          ? q.fiveHour.remainingPercent
-          : (!q.fiveHour && isKnownPct(q.remainingPercent) ? q.remainingPercent : null);
-        const pW = isKnownPct(q.weekly?.remainingPercent) ? q.weekly.remainingPercent : null;
-        const r5 = q.fiveHour?.resetTimeZh || (!q.fiveHour ? q.resetTimeZh : '') || '';
-        const rW = q.weekly?.resetTimeZh || '';
-        const rAny = r5 || rW || q.resetTimeZh || '';
+        const { p5, pBase, pW, r5, rBase, rW, rAny } = extractQuotaParts(q);
 
         let valText = '';
         let barPct = null;
         if (p5 !== null && pW !== null) {
           valText = `5h ${p5.toFixed(1)}% · 周 ${pW.toFixed(1)}%`;
           barPct = Math.min(p5, pW);
+        } else if (pBase !== null && pW !== null) {
+          valText = `基础 ${pBase.toFixed(1)}% · 周 ${pW.toFixed(1)}%`;
+          barPct = Math.min(pBase, pW);
         } else if (p5 !== null) {
-          const prefix5h = q.fiveHour ? '5h ' : '';
-          valText = `${prefix5h}${p5.toFixed(1)}%${r5 ? ` · ${r5}重置` : ''}`;
+          valText = `5h ${p5.toFixed(1)}%${r5 ? ` · ${r5}重置` : ''}`;
           barPct = p5;
+        } else if (pBase !== null) {
+          const rstNote = r5 ? `5h ${r5}重置` : (rBase ? `${rBase}重置` : '');
+          valText = `基础 ${pBase.toFixed(1)}%${rstNote ? ` · ${rstNote}` : ''}`;
+          barPct = pBase;
         } else if (pW !== null) {
           valText = `周 ${pW.toFixed(1)}%${rW ? ` · ${rW}重置` : ''}`;
           barPct = pW;
@@ -1811,12 +1873,14 @@
           const variantCount = pool.modelsCount || modelLabels.length;
           const hoverDetail = modelLabels.length ? `包含档位：${modelLabels.join('、')}` : label;
 
+          const { pBase, rBase } = extractQuotaParts(pool);
           if (pool.fiveHour || pool.weekly) {
             const winBlocks = [];
+            if (pBase !== null) {
+              winBlocks.push(renderQuotaWinBlock('基础配额窗口', pBase, rBase || pool.resetTimeZh, '自动周期重置'));
+            }
             if (pool.fiveHour) {
               winBlocks.push(renderQuotaWinBlock('5 小时滚动限额', pool.fiveHour.remainingPercent, pool.fiveHour.resetTimeZh, '5h 滚动重置'));
-            } else if (isKnownPct(pool.remainingPercent)) {
-              winBlocks.push(renderQuotaWinBlock('基础配额窗口', pool.remainingPercent, pool.resetTimeZh, '自动周期重置'));
             }
             if (pool.weekly) {
               winBlocks.push(renderQuotaWinBlock('Week 周度总额度（档位共享池）', pool.weekly.remainingPercent, pool.weekly.resetTimeZh, '按周重置'));
